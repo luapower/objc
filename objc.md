@@ -1,7 +1,8 @@
-----
-project: objc
-tagline: Objective-C bridge
-----
+---
+project:   objc
+platforms: osx32, osx64
+tagline:   Objective-C bridge
+---
 
 **NOTE: This is just a distribution of TLC. TLC is developed [here][tlc site].**
 
