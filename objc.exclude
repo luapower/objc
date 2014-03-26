@@ -1,0 +1,14 @@
+*
+!/bin/
+!/bin/osx32/
+!/bin/osx64/
+!/bin/osx32/clib/
+!/bin/osx64/clib/
+!/csrc/
+!/media/
+
+!/objc*
+!/objc/
+!/objc/**
+!/csrc/objc/
+!/csrc/objc/**
