@@ -178,7 +178,6 @@ local _impTypeCache = setmetatable({}, {__index=function(t,impSig)
 end})
 local _idType = ffi.typeof("struct objc_object*")
 objc.idType = _idType
-local _UINT_MAX = 0xffffffffffffffffULL
 
 -- Parses an ObjC type encoding string into an array of type dictionaries
 function objc.parseTypeEncoding(str)
@@ -280,7 +279,7 @@ local function _parseStructOrUnionEncoding(encoded, isUnion)
     end
 end
 
--- Takes a type table (contains type info for a single type, obtained using parseTypeEncoding), and converts it to a  c signature
+-- Takes a type table (contains type info for a single type, obtained using parseTypeEncoding), and converts it to a C signature
 -- The optional second argument specifies whether or not 
 local _typeEncodings = {
     ["@"] = "id", ["#"] = "Class", ["c"] = "char", ["C"] = "unsigned char",
@@ -328,6 +327,7 @@ function objc.typeToCType(type, varName)
 
     return ret
 end
+
 -- Creates a C function signature string for the given types
 function objc.impSignatureForTypeEncoding(signature, name)
     name = name or "*" -- Default to an anonymous function pointer

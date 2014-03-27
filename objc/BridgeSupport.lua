@@ -80,7 +80,15 @@ local _parseCallbacks = {
                 end
             end
         --elseif name == "field" then
-        --elseif name == "cftype" then
+        elseif name == "cftype" then
+            --require'pp'.pp(attrs)          
+            local type = objc.parseTypeEncoding(attrs[typeKey] or attrs.type)
+            if type ~= nil and #type > 0 then
+                type = objc.typeToCType(type[1], attrs.name)
+                if type ~= nil then
+                    ffi.cdef("typedef "..type)
+                end
+            end
         elseif name == "constant" then
             local type = objc.parseTypeEncoding(attrs[typeKey] or attrs.type)
             if type ~= nil and #type > 0 then
@@ -117,17 +125,17 @@ local _parseCallbacks = {
         if name == "function" then
             local sig       = _curObj.retval..table.concat(_curObj.args)
             local signature = objc.impSignatureForTypeEncoding(sig, _curObj.name)
+            local name = _curObj.name
             if signature ~= nil then
-                bs[_curObj.name] = function(...)
-                    print("lazy loading fun")
-                    bs[_curObj.name] = ffi.cdef(signature)
+                bs[name] = function(...)
+                    bs[name] = ffi.cdef(signature)
                     if _loadingGlobally == true then
-                        _G[_curObj.name] = C[_curObj.name]
+                        _G[name] = C[name]
                     end
-                    return bs[_curObj.name](...)
+                    return bs[name](...)
                 end
                 if _loadingGlobally == true then
-                    _G[_curObj.name] = bs[_curObj.name]
+                    _G[name] = bs[name]
                 end
             end
             _curObj = nil
@@ -141,17 +149,7 @@ function bs.load(path)
         return
     end
     _parsedBsFiles[path] = true
-
-    --[[
-    local parser = lxp.new(_parseCallbacks)
-    for l in io.lines(path) do
-        parser:parse(l)
-    end
-    parser:parse()
-    parser:close()
-    ]]
     expat.parse({path = path}, _parseCallbacks)
-
 end
 
 return bs
