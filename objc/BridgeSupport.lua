@@ -2,6 +2,7 @@ local objc = require("objc")
 local ffi = require("ffi")
 local C = ffi.C
 local expat = require'expat'
+local _log = objc.log
 
 local bs = setmetatable({
     loadDependencies = false -- Load dependencies of bs files. Off by default since the base frameworks load a huge amount of dependencies.
@@ -70,6 +71,7 @@ local _parseCallbacks = {
             if type ~= nil and #type > 0 then
                 type = objc.typeToCType(type[1])
                 if type ~= nil then
+                    --_log("typedef "..type.." "..attrs.name)
                     local success, err = pcall(ffi.cdef, "typedef "..type.." "..attrs.name)
                     if success == false then
                         print("[bs] Error loading function "..attrs.name..": "..err)
@@ -81,11 +83,11 @@ local _parseCallbacks = {
             end
         --elseif name == "field" then
         elseif name == "cftype" then
-            --require'pp'.pp(attrs)          
             local type = objc.parseTypeEncoding(attrs[typeKey] or attrs.type)
             if type ~= nil and #type > 0 then
                 type = objc.typeToCType(type[1], attrs.name)
                 if type ~= nil then
+                    --_log("typedef "..type)
                     ffi.cdef("typedef "..type)
                 end
             end
@@ -94,6 +96,7 @@ local _parseCallbacks = {
             if type ~= nil and #type > 0 then
                 type = objc.typeToCType(type[1], attrs.name)
                 if type ~= nil then
+                    --_log(type)
                     ffi.cdef(type)
                 end
             end

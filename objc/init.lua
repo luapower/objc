@@ -1,7 +1,9 @@
 -- TLC - The Tiny Lua Cocoa Bridge
--- Note: Only tested with LuaJit 2 Beta 9 on x86_64 with OS X >=10.6 & iPhone 4 with iOS 5
+-- Note: Only tested with LuaJIT 2 Beta 9 on x86_64 with OS X >=10.6 & iPhone 4 with iOS 5
+-- Note: Tested again with LuaJIT 2.0.3 on i386 with OS X 10.9
 
 -- Copyright (c) 2012, Fjölnir Ásgeirsson
+-- Modifications by Cosmin Apreutesei (public domain)
 
 -- Permission to use, copy, modify, and/or distribute this software for any
 -- purpose with or without fee is hereby granted, provided that the above
@@ -38,6 +40,8 @@ local function _log(...)
         io.stderr:write("[objc] "..table.concat(args, " ").."\n")
     end
 end
+
+objc.log = _log
 
 if ffi.abi("64bit") then
     ffi.cdef([[
@@ -309,6 +313,7 @@ function objc.typeToCType(type, varName)
         ret = string.format("%s %s %s%s", ret, unionType, ptrStr, varName)
     elseif typeStr == "struct" then
         local structType = _parseStructOrUnionEncoding(encoding, false)
+        --print(structType, encoding)
         if structType == nil then
             _log("Error! type encoding '", encoding, "' is not supported")
             return nil
@@ -655,8 +660,8 @@ end
 function objc.swizzle(class, origSel, newSel)
     local origMethod = C.class_getInstanceMethod(class, origSel)
     local newMethod = C.class_getInstanceMethod(class, newSel)
-    if C.class_addMethod(class, origSel, C.method_getImplementation(newMethod), C.method_getTypeEncoding(newMethod)) == true then
-        C.class_replaceMethod(class, newSel, C.method_getImplementation(origMethod), C.method_getTypeEncoding(origMethod));
+    if C.class_addMethod(class, origSel, C.method_getImplementation(newMethod), C.method_getTypeEncoding(newMethod)) == 1 then
+        C.class_replaceMethod(class, newSel, C.method_getImplementation(origMethod), C.method_getTypeEncoding(origMethod))
     else
         C.method_exchangeImplementations(origMethod, newMethod)
     end
@@ -693,7 +698,7 @@ function objc.addMethod(class, selector, lambda, typeEncoding)
 end
 
 local function _getIvarInfo(instance, ivarName)
-        local ivar = C.object_getInstanceVariable(instance, ivarName, nil)
+    local ivar = C.object_getInstanceVariable(instance, ivarName, nil)
     if ivar == nil then
         return nil
     end
