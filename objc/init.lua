@@ -20,6 +20,8 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
+assert(ffi.os == 'OSX', 'platform not OSX')
+
 local objc = {
     debug = false,
     relaxedSyntax = true, -- Allows you to omit trailing underscores when calling methods at the expense of some performance.
@@ -113,6 +115,8 @@ int access(const char *path, int amode);
 local C = ffi.C
 
 function objc.loadFramework(name, absolute)
+	--print('objc.Framework', name)
+	--print'==============================================='
     local canRead = bit.lshift(1,2)
     -- Check if it's an absolute path
     if absolute then
@@ -190,7 +194,7 @@ function objc.parseTypeEncoding(str)
     local depth = 0
     local inQuotes = false
     local curField = fields[1]
-    
+
     local temp, c
     for i=1, #str do
         c = str:sub(i,i)
@@ -198,7 +202,7 @@ function objc.parseTypeEncoding(str)
         elseif c:find("^[}%)%]]") then depth = depth - 1
         elseif c == '"' then inQuotes = not inQuotes;
         end
-        
+
         if depth > 0 then
             curField.type = curField.type .. c
         elseif inQuotes == true and c ~= '"' then
@@ -208,7 +212,7 @@ function objc.parseTypeEncoding(str)
         elseif c:find('^["nobNRVr%^%d]') == nil then -- Skip over type qualifiers and bitfields
             curField.type = curField.type .. c
             fieldIdx = fieldIdx + 1
-            fields[fieldIdx] = { name = "", type = "", indirection = 0 } 
+            fields[fieldIdx] = { name = "", type = "", indirection = 0 }
             curField = fields[fieldIdx]
         end
     end
@@ -232,7 +236,7 @@ end
 
 -- Parses a struct/union encoding like {CGPoint="x"d"y"d}
 local _definedStructs = setmetatable({}, { __mode = "kv" })
-local function _parseStructOrUnionEncoding(encoded, isUnion)
+local function _parseStructOrUnionEncoding(encoded, isUnion, magic)
     local pat = "{([^=}]+)[=}]"
     local keyword = "struct"
     if isUnion == true then
@@ -252,7 +256,10 @@ local function _parseStructOrUnionEncoding(encoded, isUnion)
     local typeStr = _definedStructs[name]
     -- If the struct has been defined already, or does not have field name information, just return the name
     if typeStr ~= nil then
-        return keyword.." "..name
+         --if name:match'mach_timebase_info' and magic then
+            --print('1 >>>>>>>>>', keyword.." "..name, encoded, typeStr)
+         --end
+		  return keyword.." "..name
     end
 
     typeStr = keyword.." "..name.." { "
@@ -270,21 +277,30 @@ local function _parseStructOrUnionEncoding(encoded, isUnion)
     typeStr = typeStr .." }"
 
     -- If the struct has a name we create a ctype and then just return the name for it. If it has none, we return the definition
-    if #name > 0 then
+    if #name > 0 and magic then
+         --if name:match'mach_timebase_info' and magic then
+            --print('0 >>>>>>>>>', keyword.." "..name, encoded, typeStr)
+         --end
         _definedStructs[name] = typeStr
         -- We need to wrap the def in a pcall so that we don't crash in case the struct is too big (As is the case with one in IOKit)
         local success, err = pcall(ffi.cdef, typeStr)
         if success == false then
-            _log("Error loading struct ", name, ": ", err)
+            _log("Error loading struct ", name, "-", typeStr, ": ", err)
         end
+			--if name:match'^CGRect$' then
+			--	print('2 >>>>>>>>>', keyword.." "..name, encoded, typeStr)
+			--end
         return keyword.." "..name
     else
+			--if name:match'^CGRect$' then
+			--	print('3 >>>>>>>>>', encoded, typeStr)
+			--end
         return typeStr
     end
 end
 
 -- Takes a type table (contains type info for a single type, obtained using parseTypeEncoding), and converts it to a C signature
--- The optional second argument specifies whether or not 
+-- The optional second argument specifies whether or not
 local _typeEncodings = {
     ["@"] = "id", ["#"] = "Class", ["c"] = "char", ["C"] = "unsigned char",
     ["s"] = "short", ["S"] = "unsigned short", ["i"] = "int", ["I"] = "unsigned int",
@@ -292,7 +308,7 @@ local _typeEncodings = {
     ["f"] = "float", ["d"] = "double", ["B"] = "BOOL", ["v"] = "void", ["^"] = "void *", ["?"] = "void *",
     ["*"] = "char *", [":"] = "SEL", ["?"] = "void", ["{"] = "struct", ["("] = "union", ["["] = "array"
 }
-function objc.typeToCType(type, varName)
+function objc.typeToCType(type, varName, magic)
     varName = varName or ""
     local ret = ""
     local encoding = type.type
@@ -312,7 +328,7 @@ function objc.typeToCType(type, varName)
         end
         ret = string.format("%s %s %s%s", ret, unionType, ptrStr, varName)
     elseif typeStr == "struct" then
-        local structType = _parseStructOrUnionEncoding(encoding, false)
+        local structType = _parseStructOrUnionEncoding(encoding, false, magic)
         --print(structType, encoding)
         if structType == nil then
             _log("Error! type encoding '", encoding, "' is not supported")
@@ -337,7 +353,7 @@ end
 function objc.impSignatureForTypeEncoding(signature, name)
     name = name or "*" -- Default to an anonymous function pointer
     signature = signature or "v"
-    
+
     local types = objc.parseTypeEncoding(signature)
     if types == nil or #types == 0 then
         return nil
@@ -592,7 +608,7 @@ function objc.getInstanceMethodCaller(realSelf,selArg)
         local className = _classNameCache[self]
         _instanceMethodCache[className] = _instanceMethodCache[className] or {}
         _instanceMethodCache[className][selArg] = function(receiver, ...)
-            
+
             local success, ret = pcall(imp, receiver, SEL(selStr), ...)
             if success == false then
                 error("Error calling '"..selStr.."': "..ret.."\n"..debug.traceback())
@@ -679,7 +695,7 @@ function objc.addMethod(class, selector, lambda, typeEncoding)
 
     -- If one exists, the existing/super method will be renamed to this selector
     local renamedSel = objc.SEL("__"..objc.selToStr(selector))
-    
+
     local couldAddMethod = C.class_addMethod(class, selector, imp, typeEncoding)
     if couldAddMethod == 0 then
         -- If the method already exists, we just add the new method as old{selector} and swizzle them
