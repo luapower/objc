@@ -6,8 +6,6 @@ local ffi = require'ffi'
 local bit = require'bit'
 local expat = require'expat'
 
---assert(ffi.os == 'OSX', 'platform not OSX')
-
 if ffi.abi'64bit' then
 	ffi.cdef[[
 	typedef double CGFloat;
@@ -87,13 +85,25 @@ void method_exchangeImplementations(Method m1, Method m2);
 BOOL class_addIvar(Class cls, const char *name, size_t size, uint8_t alignment, const char *types);
 const char * ivar_getTypeEncoding(Ivar ivar);
 ptrdiff_t ivar_getOffset(Ivar ivar);
-
 ]]
 
 local C = ffi.C
 local objc = {C = C}
 
-objc.debug = false --set to 'cdef' for printing out the cdefs too
+objc.debug = {
+	errors = true,         --log errors
+	cdefs = false,         --print cdefs to stdout
+	func_cdef = false,     --cdef functions at the time of parsing instead of lazily (see below)
+	methods = false,       --log method ctypes
+	load = false,          --log framework paths
+	release = false,       --log relases with refcount
+	redef = false,         --check inconsistent struct redefinition attempts
+	stats = {
+		errors = 0,         --number of cdef errors
+		cdefs = 0,          --number of cdefs
+		redef = 0,          --number of struct redefines (if debug.redef == true)
+	}
+}
 
 --helpers
 
@@ -107,40 +117,64 @@ local function nptr(p) --convert pointer to lua number for using as table key
 	return tonumber(ffi.cast('intptr_t', p))
 end
 
-local function memoize(func) --memoize function that can memoize pointer arguments too
-	local cache = {}
+local function memoize(func, cache) --memoize function that can memoize pointer arguments too
+	cache = cache or {}
 	return function(input)
 		local key = input
 		if type(key) == 'cdata' then
 			key = nptr(key)
 		end
-		local ret = cache[key]
-		if not ret then
+		local ret = rawget(cache, key)
+		if ret == nil then
 			ret = func(input)
-			cache[key] = ret
+			if ret == nil then return end
+			rawset(cache, key, ret)
 		end
 		return ret
 	end
 end
 
-local function log(topic, fmt, ...) --to be called only when objc.debug is set
+local function log(topic, fmt, ...) --debug logger
 	io.stderr:write(string.format('[objc] %-20s %s\n', topic, string.format(fmt, ...)))
-end
-
-local function cdef(s) --load a cdef via ffi (set objc.debug = 'cdef' to also print those out)
-	local ok, err = pcall(ffi.cdef, s)
-	if not objc.debug then return end
-	if ok then
-		if objc.debug == 'cdef' then
-			print(s)
-		end
-	elseif not err:find'attempt to redefine' then
-		log('cdef-error', '%s\n\t%s', err, s)
-	end
 end
 
 local function canread(path) --check that a file is readable without having to open it
 	return C.access(path, bit.lshift(1,2)) == 0
+end
+
+local function defined(name, namespace) --check if a name is already defined in a namespace
+	return namespace[name] and not objc.debug.redef
+end
+
+local function check_redef(name, old_cdecl, new_cdecl) --check and report cdecl redefinitions
+	if not objc.debug.redef  then return end
+	if old_cdecl == new_cdecl then return end
+	objc.debug.stats.redef = objc.debug.stats.redef + 1
+	objc.debug.stats.errors = objc.debug.stats.errors + 1
+	if not objc.debug.errors then return end
+	log('redefinition', '%s\n~~old:\n%s\n~~new:\n%s', name, old_cdecl, new_cdecl)
+end
+
+local function cdef(name, namespace, cdecl) --define a C type, const or function via ffi.cdef
+	local old_cdecl = namespace[name]
+	if old_cdecl then
+		check_redef(name, old_cdecl, cdecl)
+		return
+	end
+	local ok, err = pcall(ffi.cdef, cdecl)
+	if ok then
+		objc.debug.stats.cdefs = objc.debug.stats.cdefs + 1
+		if objc.debug.cdefs then
+			print(s)
+		end
+	else
+		objc.debug.stats.errors = objc.debug.stats.errors + 1
+		if objc.debug.errors then
+			log('cdef_error', '%s\n\t%s', err, cdecl)
+		end
+	end
+	namespace[name] = objc.debug.redef and cdecl or true --only store the cdecl if needed
+	return ok
 end
 
 --type parsing/conversion to C types
@@ -157,76 +191,83 @@ local function array_ctype(s, name, ...) --('[Ntype]', 'name') -> ctype('type', 
 	return type_ctype(s, name, ...)
 end
 
---('{sname="f1name"f1type...}', 'name') -> 'struct sname name' or just 'sname', depending on deftype.
---('(uname="f1name"f1type...)', 'name') -> 'union uname name' or just 'uname', depending on deftype.
---note: sname is the struct name in the C struct namespace; name is the typedef name in the C global namespace.
---named structs are recursively cdef'ed and only a reference from the struct namespace is returned for them.
+local structs = {} --{tag = true or ctype}
+
+--('{tag="f1name"f1type...}', 'name') -> 'struct tag name' or just 'tag', depending on deftype.
+--('(tag="f1name"f1type...)', 'name') -> 'union tag name' or just 'tag', depending on deftype.
+--note: tag is the struct tag in the C struct namespace; name is the typedef name in the C global namespace.
+--named structs are recursively cdef'ed and only a tag reference is returned for them.
 --for anonymous structs the complete definition is returned instead.
 local function struct_ctype(s, name, deftype)
 
-	--break the struct/union def. in its constituent parts: keyword, name, type-string
+	--break the struct/union def. in its constituent parts: keyword, tag, fields
 	local kw, s = s:match'^(.)(.*).$' --'{...}' or '(...)'
 	kw = kw == '{' and 'struct' or 'union'
-	local sname, fields = s:match'^([^=]*)=?(.*)$' -- 'name=fields'
-	if sname == '?' or sname == '' then sname = nil end -- ? or empty means anonymous struct/union
+	local tag, fields = s:match'^([^=]*)=?(.*)$' -- 'name=fields'
+	if tag == '?' or tag == '' then tag = nil end -- ? or empty means anonymous struct/union
 	if fields == '' then fields = nil end -- empty definition means opaque struct/union
 
-	if not fields or deftype ~= 'sref' then
-		--opaque struct, either because it has no definition (no fields), or because it comes
-		--from bridgesupport tags `constant`, `opaque`, `function`, or from a method type string,
-		--which should've been already defined from loading the bridgesupport file of the framework.
-		--assert(sname) --must be a named struct in this case.
-		return string.format('%s %s%s', kw, sname, optname(name))
+	if not fields or deftype ~= 'cdef' then --opaque struct or asked by caller not to be cdef'ed
+		return string.format('%s %s%s', kw, tag or '_', optname(name))
 	end
 
-	--parse the fields which come as '"name1"type1"name2"type2...'
-	local t = {}
-	local function addfield(fname, s)
-		if fname == '' then fname = nil end --empty field name means unnamed struct/union (different from anonymous)
-		table.insert(t, type_ctype(s, fname, 'sref')) --eg. 'struct _NSPoint origin'
-		return '' --remove the match
-	end
-	local s = fields
-	local n
-	while s ~= '' do
-		s,n = s:gsub('^"([^"]*)"([%^]*%b{})', addfield) --try "field"{...}
-		if n == 0 then
-			s,n = s:gsub('^"([^"]*)"([%^]*%b())', addfield) --try "field"(...)
-		end
-		if n == 0 then
-			s,n = s:gsub('^"([^"]+)"([%^]*%b[])', addfield) --try "field"[...]
-		end
-		if n == 0 then
-			s,n = s:gsub('^"([^"]*)"([^"]+)', addfield) --try "field"...
-		end
-		if n == 0 then
-			s,n = s:gsub('^"([^"]+)"$', '') --try "field"@"NSImage" from HIToolbox (possibly a bug in the xml)
-		end
-		assert(n > 0, s)
-	end
-	local ctype = string.format('%s%s {\n\t%s;\n}', kw, optname(sname), table.concat(t, ';\n\t'))
+	if not tag or not defined(tag, structs) then --not defined or anonymous: parse it
 
-	if not sname then
+		--parse the fields which come as '"name1"type1"name2"type2...'
+		local t = {}
+		local function addfield(fname, s)
+			if fname == '' then fname = nil end --empty field name means unnamed struct/union (different from anonymous)
+			table.insert(t, type_ctype(s, fname, 'cdef')) --eg. 'struct _NSPoint origin'
+			return '' --remove the match
+		end
+		local s = fields
+		local n
+		while s ~= '' do
+			s,n = s:gsub('^"([^"]*)"([%^]*%b{})', addfield) --try "field"{...}
+			if n == 0 then
+				s,n = s:gsub('^"([^"]*)"([%^]*%b())', addfield) --try "field"(...)
+			end
+			if n == 0 then
+				s,n = s:gsub('^"([^"]+)"([%^]*%b[])', addfield) --try "field"[...]
+			end
+			if n == 0 then
+				s,n = s:gsub('^"([^"]*)"([^"]+)', addfield) --try "field"...
+			end
+			if n == 0 then
+				s,n = s:gsub('^"([^"]+)"$', '') --try "field"@"NSImage" from HIToolbox (possibly a bug in the xml)
+			end
+			assert(n > 0, s)
+		end
+		local ctype = string.format('%s%s {\n\t%s;\n}', kw, optname(tag), table.concat(t, ';\n\t'))
+
 		--anonymous struct/union: return the full definition
-		return string.format('%s%s', ctype, optname(name))
-	else
-		--named struct: cdef it and return as struct name reference (sref) instead
-		cdef(ctype .. ';')
-		return string.format('%s %s%s', kw, sname, optname(name))
+		if not tag then
+			return string.format('%s%s', ctype, optname(name))
+		end
+
+		--named struct: cdef it
+		cdef(tag, structs, ctype .. ';')
 	end
+
+	return string.format('%s %s%s', kw, tag, optname(name))
 end
 
 local function bitfield_ctype(s, name) --('bN', 'name') -> 'unsigned int name: N'
 	local n = s:match'^b(%d+)$'
-	return string.format('unsigned int %s: %d', name, n)
+	return string.format('unsigned int %s: %d', name or '_', n)
 end
 
-local function pointer_ctype(s, name, ...) --('^type', 'name') -> ctype('type', '(*name)')
-	return type_ctype(s:sub(2), string.format('(*%s)', name or ''), ...)
+local function pointer_ctype(s, name, deftype) --('^type', 'name') -> ctype('type', '(*name)')
+	if deftype == 'retval' then
+		name = string.format('*%s', name or '') --special case for function return values
+	else
+		name = string.format('(*%s)', name or '') --make `(*int)[8]` instead of the ambiguous `*int[8]`
+	end
+	return type_ctype(s:sub(2), name, deftype)
 end
 
-local function char_ptr_ctype(s, name) --('*', 'name') -> 'char (*name)'
-	return string.format('char *%s', name or '')
+local function char_ptr_ctype(s, name, ...) --('*', 'name') -> 'char *name'
+	return pointer_ctype('^c', name, ...)
 end
 
 local function primitive_ctype(ctype)
@@ -254,6 +295,7 @@ local ctype_decoders = {
 	['B'] = primitive_ctype'BOOL',
 	['v'] = primitive_ctype'void',
 	['?'] = primitive_ctype'void', --unknown type; used for function pointers among other things
+	['Z'] = primitive_ctype'bool', --undocumented
 
 	['@'] = primitive_ctype'id',
 	['#'] = primitive_ctype'Class',
@@ -268,9 +310,7 @@ local ctype_decoders = {
 }
 
 --convert a runtime type encoding to a C type (as string)
---deftype specifies how structs should be parsed and returned:
---  'sref' means cdef the structs and then reference them as 'struct foo'
---  nil (default) means don't cdef structs.
+--deftype = 'cdef' means that named structs should be cdef'ed before returning.
 function type_ctype(s, name, deftype)
 	local decoder = ctype_decoders[s:sub(1,1)]
 	return decoder(s, name, deftype)
@@ -280,8 +320,8 @@ end
 local method_ctype = memoize(function(s)
 	local ret_ctype
 	local arg_ctypes = {}
-	for s in s:gmatch'[rnNoORV]?([^%d]+)%d+' do --result-type offset arg1-type offset arg2-type offset ...
-		local ctype = type_ctype(s)
+	for s in s:gmatch'[rnNoORV]?([^%d]+)%d+' do --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
+		local ctype = type_ctype(s, nil, not ret_ctype and 'retval')
 		if not ret_ctype then
 			ret_ctype = ctype
 		else
@@ -289,7 +329,7 @@ local method_ctype = memoize(function(s)
 		end
 	end
 	local func_ctype = string.format('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
-	if objc.debug then
+	if objc.debug.methods then
 		log('method_ctype', '%-20s %s', s, func_ctype)
 	end
 	return ffi.typeof(func_ctype)
@@ -297,29 +337,46 @@ end)
 
 --bridgesupport file parsing
 
+--rename table for structs to solve name clashing
+local rename = {string = {}, enum = {}, typedef = {}, const = {}, ['function'] = {}}
+objc.debug.rename = rename
+
+rename.typedef.mach_timebase_info = 'mach_timebase_info_t'
+rename.const.TkFont = 'const_TkFont'
+
+local function global(name, kind) --use a rename table to do renaming of certain problematic globals
+	return rename[kind][name] or name
+end
+
 local xml    = {} --{expat_callback = handler}
 local tag    = {} --{tag = start_tag_handler}
 local endtag = {} --{tag = end_tag_handler}
 
+local __nodeps --switch to skip loading dependencies (set by load_bridgesuport)
 function tag.depends_on(attrs)
+	if __nodeps then return end
 	objc.load(attrs.path)
 end
 
 function tag.string_constant(attrs)
-	objc[attrs.name] = attrs.value
+	rawset(objc, global(attrs.name, 'string'), attrs.value)
 end
 
 function tag.enum(attrs)
-	objc[attrs.name] = tonumber(attrs.value)
+	rawset(objc, global(attrs.name, 'enum'), tonumber(attrs.value))
 end
 
 local typekey = ffi.abi'64bit' and 'type64' or 'type'
 
+local globals = {} --{name = true or ctype}; the namespace for C typedefs, consts and functions
+
 local function cdef_node(attrs, typedecl, deftype)
+	local name = global(attrs.name, typedecl)
+	if defined(name, globals) then return end
 	local s = attrs[typekey] or attrs.type
 	if not s then return end --type not available on this platform
-	local ctype = type_ctype(s, attrs.name, deftype)
-	cdef(string.format('%s %s;', typedecl, ctype))
+	local ctype = type_ctype(s, name, deftype)
+	cdef(name, globals, string.format('%s %s;', typedecl, ctype))
 end
 
 function tag.constant(attrs)
@@ -327,38 +384,62 @@ function tag.constant(attrs)
 end
 
 function tag.struct(attrs)
-	cdef_node(attrs, 'typedef', 'sref')
+	cdef_node(attrs, 'typedef', 'cdef')
 end
 
 function tag.cftype(attrs)
-	cdef_node(attrs, 'typedef', 'sref')
+	cdef_node(attrs, 'typedef', 'cdef')
 end
 
 function tag.opaque(attrs)
 	cdef_node(attrs, 'typedef')
 end
 
-local ftag --current function tag object
+local ftag --state for accumulating args on the current 'function' tag
 
 tag['function'] = function(attrs)
-	ftag = {name = attrs.name, retval = type_ctype'v', args = {}}
+	local name = global(attrs.name, 'function')
+	if defined(name, globals) then return end
+	ftag = {name = name, retval = type_ctype'v', args = {}}
 end
 
 function tag.retval(attrs)
-	if not ftag then return end
-	ftag.retval = type_ctype(attrs[typekey] or attrs.type)
+	if not ftag then return end --canceled by prev. tag.arg
+	local s = attrs[typekey] or attrs.type
+	if not s then ftag = nil; return end --arg not available on 32bit, cancel the recording
+	ftag.retval = type_ctype(s, nil, 'retval')
 end
 
 function tag.arg(attrs)
-	if not ftag then return end
+	if not ftag then return end --canceled by prev. tag.arg or tag.retval
 	local s = attrs[typekey] or attrs.type
 	if s == '@?' then s = '@' end --block definition
+	if not s then ftag = nil; return end --arg not available on 32bit, skip the entire function
 	table.insert(ftag.args, type_ctype(s))
 end
 
 endtag['function'] = function()
-	cdef(string.format('%s %s (%s);', ftag.retval, ftag.name, table.concat(ftag.args, ', ')))
+	if not ftag then return end --canceled by prev. tag.arg or tag.retval
+	local cdecl = string.format('%s %s (%s);', ftag.retval, ftag.name, table.concat(ftag.args, ', '))
+	local fname = ftag.name
 	ftag = nil
+	if objc.debug.func_cdef then
+		cdef(fname, globals, cdecl)
+	else
+		local old_cdecl = globals[fname]
+		if old_cdecl then
+			check_redef(fname, old_cdecl, cdecl)
+			return
+		end
+		--delay the cdef'ing of the function until the first call, to avoid polluting the C space with unused declarations.
+		--this is because in luajit2 can only hold as many as 64k ctypes total.
+		rawset(objc, fname, function(...)
+			cdef(fname, globals, cdecl)
+			local fctype = C[fname]
+			rawset(objc, fname, nil) --remove this wrapper; later calls will go to the C namespace directly.
+			return fctype(...)
+		end)
+	end
 end
 
 function xml.start_tag(name, attrs)
@@ -369,7 +450,8 @@ function xml.end_tag(name)
 	if endtag[name] then endtag[name]() end
 end
 
-function objc.load_bridgesuport(path)
+function objc.load_bridgesuport(path, nodeps)
+	__nodeps = nodeps --set nodeps barrier
 	expat.parse({path = path}, xml)
 end
 
@@ -409,17 +491,17 @@ objc.loaded = {} --{framework = true}
 objc.loaded_bs = {} --{framework = true}
 
 --load a framework given its name or full path; objc.load(name, false) skips loading bridgesupport files.
-function objc.load(namepath, bridgesupport)
+function objc.load(namepath, option)
 	local basepath, name = search(namepath)
 	if not basepath then
 		error(string.format('[objc] %s not found', namepath))
 	end
-	if bridgesupport ~= false and not objc.loaded_bs[basepath] then
+	if option ~= 'notypes' and not objc.loaded_bs[basepath] then
 		objc.loaded_bs[basepath] = true
 		--bridgesupport files contain typedefs and constants which we can't get from the runtime
 		local path = string.format('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
 		if canread(path) then
-			objc.load_bridgesuport(path)
+			objc.load_bridgesuport(path, option == 'nodeps')
 		end
 		--bridgesupport dylibs contain callable versions of inline functions (NSMakePoint, etc.)
 		local path = string.format('%s/Resources/BridgeSupport/%s.dylib', basepath, name)
@@ -431,7 +513,7 @@ function objc.load(namepath, bridgesupport)
 	if not objc.loaded[basepath] then
 		objc.loaded[basepath] = true
 		ffi.load(string.format('%s/%s', basepath, name), true)
-		if objc.debug then
+		if objc.debug.load then
 			log('load', '%s', basepath)
 		end
 	end
@@ -457,7 +539,7 @@ ffi.metatype('struct objc_selector', {
 
 local class_object = memoize(function(name)
 	return ptr(C.objc_getClass(name))
-end)
+end, objc)
 
 local class_name = memoize(function(class)
 	return ffi.string(C.class_getName(class))
@@ -472,7 +554,7 @@ end
 
 local protocol_object = memoize(function(name)
 	return ptr(C.objc_getProtocol(name))
-end)
+end, objc)
 
 local function protocol(proto)
 	if type(proto) ~= 'string' then return proto end
@@ -533,7 +615,9 @@ local function create_method_wrapper(get_method, class, sel_str)
 	local sel, method = get_sel_and_method(get_method, class, sel_str)
 
 	if not method then
-		print(string.format('method not found [%s %s]', tostring(class), sel_str))
+		if objc.debug.errors then
+			log('method_call', 'method not found [%s %s]', tostring(class), sel_str)
+		end
 		return nil
 	end
 
@@ -637,7 +721,7 @@ ffi.metatype('struct objc_class', {
 local _instance_variables = {} --{[nptr(obj)] = {var1 = val1, ...}}
 
 function release_object(obj)
-	if objc.debug then
+	if objc.debug.release then
 		log('release_object', '%s, refcount: %d', tostring(obj), tonumber(obj:retainCount()))
 	end
 	obj:release()
@@ -687,13 +771,9 @@ ffi.metatype('struct objc_object', {
 
 setmetatable(objc, {
 	__index = function(t, k)
-		local v = class(k) or C[k]
-		rawset(t, k, v) --TODO: double-caching of class objects
-		return v
+		return class_object(k) or C[k]
 	end,
 })
-
-objc.NSWin = objc.class(objc.NSWindow)
 
 --class creation & extension
 

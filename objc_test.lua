@@ -1,17 +1,42 @@
 local glue = require'glue'
 local objc = require'objc'
 local ffi = require'ffi'
+local pp = require'pp'
 
 io.stdout:setvbuf'no'
 io.stderr:setvbuf'no'
 
-objc.debug = true
+local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
+local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
+local subprocess = true --run each bridgesupport test in a subprocess
+local nodeps = true --skip loading dependencies
+objc.debug.func_cdef = true
+objc.debug.errors = true
+objc.debug.ctypes = true
+objc.debug.load = true
+objc.debug.release = true
+objc.debug.redef = true
+local default_test = 'bridgesupport'
+local default_test_args = {}--{'System'}
 
-local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows
+local function types_only()
+	subprocess = false
+	nodeps = true
+	objc.debug.func_cdef = false
+	objc.debug.errors = true
+	objc.debug.methods = true
+	objc.debug.load = true
+	objc.debug.release = true
+	objc.debug.redef = false
+end
+--types_only()
+
+
+local test = {} --{name = test_func}
 
 --test parsing of bridgesupport files.
---works on Windows too - just copy your bridgesupport files into `bsdir`.
-local function test_bridgesupport()
+--works on Windows too - just copy your bridgesupport files into whatever you set `bsdir` above.
+function test.bridgesupport(bsfile)
 
 	local function list_func(cmd)
 		return function()
@@ -54,7 +79,7 @@ local function test_bridgesupport()
 		if loaded[name] then return end
 		loaded[name] = true
 		if glue.fileexists(path) then
-			objc.load_bridgesuport(path)
+			objc.load_bridgesuport(path, nodeps)
 			n = n + 1
 			print(n, '', name)
 		else
@@ -64,14 +89,27 @@ local function test_bridgesupport()
 
 	--objc.debug = 'cdef'
 
-	for bsfile in bsfiles() do
+	if bsfile then
 		objc.load(bsfile)
+		pp(objc.debug.stats)
+	else
+		for bsfile in bsfiles() do
+			print(); print(bsfile); print(('='):rep(80))
+			if subprocess then
+				os.execute(luajit..' '..arg[0]..' bridgesupport '..bsfile)
+			else
+				objc.load(bsfile)
+			end
+			if not subprocess then
+				pp(objc.debug.stats)
+			end
+		end
 	end
 
 	objc.load = objc_load --put it back
 end
 
-local function test_classes()
+function test.classes()
 	if ffi.os ~= 'OSX' then return end
 
 	--objc.debug = 'cdef'
@@ -90,6 +128,24 @@ local function test_classes()
 	--local a = objc.NSArray:alloc()
 end
 
---test_bridgesupport()
-test_classes()
+
+--cmdline interface
+
+local test_name = ...
+local test_args = {select(2, ...)}
+if test_name == 'objc_test' then test_name = nil end --loaded as module
+if test_name == nil then
+	test_name = default_test
+	test_args = default_test_args
+end
+
+if not test_name then
+	print('Usage: '..luajit..' '..arg[0]..' <test>')
+	print'Available tests:'
+	for k in glue.sortedpairs(test) do
+		print('', k)
+	end
+else
+	test[test_name](unpack(test_args))
+end
 
