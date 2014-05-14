@@ -9,28 +9,16 @@ io.stderr:setvbuf'no'
 local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
 local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
 local subprocess = true --run each bridgesupport test in a subprocess
-local nodeps = true --skip loading dependencies
+local nodeps = false --skip loading dependencies
 objc.debug.func_cdef = true
 objc.debug.errors = true
 objc.debug.ctypes = true
-objc.debug.load = true
+objc.debug.load = true --no effect: we redefine objc.load
 objc.debug.release = true
 objc.debug.redef = true
-local default_test = 'bridgesupport'
-local default_test_args = {}--{'System'}
-
-local function types_only()
-	subprocess = false
-	nodeps = true
-	objc.debug.func_cdef = false
-	objc.debug.errors = true
-	objc.debug.methods = true
-	objc.debug.load = true
-	objc.debug.release = true
-	objc.debug.redef = false
-end
---types_only()
-
+objc.debug.methods = true
+local default_test = nil --'bridgesupport'
+local default_test_args = {}--{'/System/Library/Frameworks/OpenGL.framework'}
 
 local test = {} --{name = test_func}
 
@@ -79,29 +67,44 @@ function test.bridgesupport(bsfile)
 		if loaded[name] then return end
 		loaded[name] = true
 		if glue.fileexists(path) then
+
+			--load the dylib first (needed for function aliases)
+			local dpath = path:gsub('Resources/BridgeSupport/.*$', name)
+			if glue.fileexists(dpath) then
+				ffi.load(dpath, true)
+			end
+
+			--load the dylib with inlines first (needed for function aliases)
+			local dpath = path:gsub('bridgesupport$', 'dylib')
+			if glue.fileexists(dpath) then
+				ffi.load(dpath, true)
+			end
+
 			objc.load_bridgesuport(path, nodeps)
 			n = n + 1
 			print(n, '', name)
 		else
-			print('! not found', name)
+			print('! not found', name, path)
 		end
 	end
-
-	--objc.debug = 'cdef'
 
 	if bsfile then
 		objc.load(bsfile)
 		pp(objc.debug.stats)
 	else
 		for bsfile in bsfiles() do
-			print(); print(bsfile); print(('='):rep(80))
-			if subprocess then
-				os.execute(luajit..' '..arg[0]..' bridgesupport '..bsfile)
+			if bsfile:match'Python' then
+				print('skipping '..bsfile) --python bridgesupport files are non-standard and deprecated
 			else
-				objc.load(bsfile)
-			end
-			if not subprocess then
-				pp(objc.debug.stats)
+				print(); print(bsfile); print(('='):rep(80))
+				if subprocess then
+					os.execute(luajit..' '..arg[0]..' bridgesupport '..bsfile)
+				else
+					objc.load(bsfile)
+				end
+				if not subprocess then
+					pp(objc.debug.stats)
+				end
 			end
 		end
 	end
@@ -109,25 +112,46 @@ function test.bridgesupport(bsfile)
 	objc.load = objc_load --put it back
 end
 
+function test.properties()
+	objc.load('Foundation', 'nodeps')
+	objc.load('AppKit', 'nodeps')
+	objc.load('System', 'nodeps')
+	objc.load('CoreServices', 'nodeps')
+
+	local NSApp = objc.class('NSApp', 'NSApplication')
+	local nsapp = NSApp:sharedApplication()
+	nsapp.delegate = nsapp
+end
+
 function test.classes()
 	if ffi.os ~= 'OSX' then return end
 
-	--objc.debug = 'cdef'
-	objc.load'Foundation'
-	objc.load'AppKit'
-	objc.load'System'
-	objc.load'CoreServices'
+	objc.load('Foundation', 'nodeps')
+	objc.load('AppKit', 'nodeps')
+	objc.load('System', 'nodeps')
+	objc.load('CoreServices', 'nodeps')
+
+	--local pool = objc.NSAutoreleasePool:new()
+	local NSApp = objc.class('NSApp', 'NSApplication')
+	local nsapp = NSApp:sharedApplication()
+	nsapp.delegate = nsapp
 
 	local NSWin = objc.class('NSWin', 'NSWindow')
 	objc.conforms('NSWin', 'NSWindowDelegate')
 
-	local m = objc.NSWin:alloc():initWithContentRect_styleMask_backing_defer(
-		ffi.C.NSMakeRect(100, 100, 500, 300), 0, objc.NSBackingStoreBuffered, false)
-	--objc.load'Foundation'
-	--objc.NSHashTable:hashTableWithOptions()
-	--local a = objc.NSArray:alloc()
-end
+	local style = bit.bor(
+						objc.NSTitledWindowMask,
+						objc.NSClosableWindowMask,
+						objc.NSMiniaturizableWindowMask,
+						objc.NSResizableWindowMask)
 
+	local win = objc.NSWin:alloc():initWithContentRect_styleMask_backing_defer(
+						objc.NSMakeRect(100, 100, 500, 300), style, objc.NSBackingStoreBuffered, false)
+
+	nsapp:activateIgnoringOtherApps(true)
+	win:makeKeyAndOrderFront(nil)
+	nsapp:run()
+end
 
 --cmdline interface
 
