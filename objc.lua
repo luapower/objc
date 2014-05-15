@@ -178,6 +178,19 @@ local function canread(path) --check that a file is readable without having to o
 	return C.access(path, bit.lshift(1,2)) == 0
 end
 
+local function clist(listfunc, subj, t) --call a C list function f(subj, count) and return the results in a lua table
+	t = t or {}
+	local count = ffi.new'unsigned int[1]'
+	local lst = listfunc(subj, count)
+	for i = 0, count[0]-1 do
+		table.insert(t, lst[i])
+	end
+	C.free(lst)
+	return t
+end
+
+--cdef helpers
+
 local function defined(name, namespace) --check if a name is already defined in a C namespace (structs or globals)
 	return namespace[name] and not objc.debug.redef
 end
@@ -716,9 +729,17 @@ local function protocol_method_type(proto, sel, inst, required)
 	return ffi.string(desc.types)
 end
 
+local function protocols(cls) --does not include protocols of superclasses
+	return clist(C.class_copyProtocolList, cls)
+end
+
+local function protocol_protocols(cls) --does not include protocols of protocols
+	return clist(C.protocol_copyProtocolList, cls)
+end
+
 --find a selector in conforming protocols and if found, return its type
 function conforming_method_type(cls, sel, inst)
-	for _,proto in pairs(class_protocols(cls)) do
+	for _,proto in pairs(protocols(cls)) do
 		local mtype = protocol_method_type(proto, sel, inst)
 		if mtype then return mtype end
 	end
@@ -1035,8 +1056,13 @@ ffi.metatype('struct objc_class', {
 --try different things in order, to create the effect of inherited namespaces.
 local function get_instance_field(obj, field)
 	assert(obj ~= nil, 'attempt to index a NULL object')
-	--look for an existing lua var
+	--look for an existing instance lua var
 	local val = instance_var(obj, field)
+	if val ~= nil then
+		return val
+	end
+	--look for an existing class lua var
+	local val = class_var(obj.isa, field)
 	if val ~= nil then
 		return val
 	end
@@ -1100,19 +1126,8 @@ setmetatable(objc, {
 
 --listers
 
-local function list(listfunc, subj, t) --call a C list function f(subj, count) and return the results in a lua table
-	t = t or {}
-	local count = ffi.new'unsigned int[1]'
-	local lst = listfunc(subj, count)
-	for i = 0, count[0]-1 do
-		table.insert(t, lst[i])
-	end
-	C.free(lst)
-	return t
-end
-
 local function instance_methods(cls, methods) --returns {method1, ...}; inherited methods not included
-	return list(C.class_copyMethodList, cls, methods)
+	return clist(C.class_copyMethodList, cls, methods)
 end
 
 local function class_methods(cls, methods) --returns {method1, ...}; inherited methods not included
@@ -1120,11 +1135,11 @@ local function class_methods(cls, methods) --returns {method1, ...}; inherited m
 end
 
 local function properties(cls, props) --returns {prop1, ...}; inherited properties not included
-	return list(C.class_copyPropertyList, cls, props)
+	return clist(C.class_copyPropertyList, cls, props)
 end
 
 local function protocol_properties(proto, props) --returns {prop1, ...}; inherited properties not included
-	return list(C.protocol_copyPropertyList, proto, props)
+	return clist(C.protocol_copyPropertyList, proto, props)
 end
 
 local function protocol_methods(proto, inst, required, methods) --returns {sel, ...}; inherited methods not included
@@ -1146,14 +1161,6 @@ local function protocol_methods(proto, inst, required, methods) --returns {sel, 
 	end
 	C.free(desc)
 	return methods
-end
-
-local function protocols(cls)
-	return list(C.class_copyProtocolList, cls)
-end
-
-local function protocol_protocols(cls)
-	return list(C.protocol_copyProtocolList, cls)
 end
 
 --pretty helpers

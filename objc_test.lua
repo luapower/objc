@@ -191,12 +191,26 @@ end
 function test.luavars()
 	objc.load'Foundation'
 	local cls = objc.class(genname'MyClass', 'NSObject')
+
+	--class vars
+	cls.myclassvar = 'doh1'
+	assert(cls.myclassvar == 'doh1') --intialized
+	cls.myclassvar = 'doh'
+	assert(cls.myclassvar == 'doh') --updated
+
+	--inst vars
 	local inst = cls:new()
-	print(inst:retainCount())
-	inst:retain()
-	inst:release()
-	--inst:dealloc()
-	--print(inst:retainCount())
+
+	inst.myinstvar = "do'h1"
+	assert(inst.myinstvar == "do'h1") --initialized
+	inst.myinstvar = "do'h"
+	assert(inst.myinstvar == "do'h") --updated
+
+	--class vars from instances
+	assert(inst.myclassvar == 'doh') --class vars are readable from instances
+	inst.myclassvar = 'doh2'
+	assert(cls.myclassvar == 'doh') --but they can't be updated from instances
+	assert(inst.myclassvar == 'doh2') --all we did was to shadow the class var with an instance var
 end
 
 function test.inspect_nswindow()
