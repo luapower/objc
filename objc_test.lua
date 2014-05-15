@@ -8,16 +8,17 @@ io.stderr:setvbuf'no'
 
 local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
 local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
-local subprocess = true --run each bridgesupport test in a subprocess
-local nodeps = false --skip loading dependencies
-objc.debug.func_cdef = true
+local subprocess = false --run each bridgesupport test in a subprocess
+objc.debug.types = true
+objc.debug.deps = false --skip loading dependencies
+objc.debug.func_cdef = false --cdef functions immediately instead of lazily
 objc.debug.errors = true
 objc.debug.ctypes = true
 objc.debug.load = true --no effect: we redefine objc.load
 objc.debug.release = true
-objc.debug.redef = true
-objc.debug.methods = true
-local default_test = nil --'bridgesupport'
+objc.debug.redef = true --report redefinitions (slower)
+objc.debug.methods = false
+local default_test = 'classes'
 local default_test_args = {}--{'/System/Library/Frameworks/OpenGL.framework'}
 
 local test = {} --{name = test_func}
@@ -68,19 +69,22 @@ function test.bridgesupport(bsfile)
 		loaded[name] = true
 		if glue.fileexists(path) then
 
-			--load the dylib first (needed for function aliases)
-			local dpath = path:gsub('Resources/BridgeSupport/.*$', name)
-			if glue.fileexists(dpath) then
-				ffi.load(dpath, true)
+			if ffi.os == 'OSX' then
+				--load the dylib first (needed for function aliases)
+				local dpath = path:gsub('Resources/BridgeSupport/.*$', name)
+				if glue.fileexists(dpath) then
+					ffi.load(dpath, true)
+				end
+
+				--load the dylib with inlines first (needed for function aliases)
+				local dpath = path:gsub('bridgesupport$', 'dylib')
+				print(path, dpath)
+				if glue.fileexists(dpath) then
+					ffi.load(dpath, true)
+				end
 			end
 
-			--load the dylib with inlines first (needed for function aliases)
-			local dpath = path:gsub('bridgesupport$', 'dylib')
-			if glue.fileexists(dpath) then
-				ffi.load(dpath, true)
-			end
-
-			objc.load_bridgesuport(path, nodeps)
+			objc.load_bridgesuport(path)
 			n = n + 1
 			print(n, '', name)
 		else
@@ -112,20 +116,79 @@ function test.bridgesupport(bsfile)
 	objc.load = objc_load --put it back
 end
 
+local n = 0
+local function genname(prefix)
+	n = n + 1
+	return prefix..n
+end
+
+function test.selectors()
+	assert(tostring(objc.SEL'se_lec_tor') == 'se:lec:tor')
+	assert(tostring(objc.SEL'se_lec_tor_') == 'se:lec:tor:')
+	assert(tostring(objc.SEL'__se_lec_tor') == '__se:lec:tor')
+	assert(tostring(objc.SEL'__se:lec:tor:') == '__se:lec:tor:')
+end
+
+function test.errors()
+	objc.load'Foundation'
+	print(pcall(objc.class, 'NSObject'))
+	print(pcall(objc.class, genname'MyClass', 'MyUnknownClass'))
+	print(pcall(objc.class, genname'MyClass', 'NSObject <MyUnknownProtocol>'))
+
+end
+
+function test.newclass()
+	local cls = objc.class'MyClassX'
+	assert(tostring(cls) == 'MyClassX')
+
+	local cls = objc.class(genname'MyClass', 'NSArray')
+
+
+	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate>')
+
+
+end
+
+function test.inspect()
+	objc.inspect_protocol'NSFilePresenter'
+	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate>')
+	objc.inspect_class(cls)
+end
+
+function test.inspect_nswindow()
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
+	objc.inspect_class'NSWindow'
+end
+
+
 function test.properties()
-	objc.load('Foundation', 'nodeps')
-	objc.load('AppKit', 'nodeps')
-	objc.load('System', 'nodeps')
-	objc.load('CoreServices', 'nodeps')
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
 
 	local NSApp = objc.class('NSApp', 'NSApplication')
 	local nsapp = NSApp:sharedApplication()
 	nsapp.delegate = nsapp
 end
 
-function test.classes()
-	if ffi.os ~= 'OSX' then return end
 
+function test.classes()
+
+	--[[
+	test.selectors()
+	test.errors()
+	test.newclass()
+	test.inspect()
+	]]
+	test.inspect_nswindow()
+
+	--local objc.NSArray
+
+	--[[
 	objc.load('Foundation', 'nodeps')
 	objc.load('AppKit', 'nodeps')
 	objc.load('System', 'nodeps')
@@ -151,6 +214,7 @@ function test.classes()
 	nsapp:activateIgnoringOtherApps(true)
 	win:makeKeyAndOrderFront(nil)
 	nsapp:run()
+	]]
 end
 
 --cmdline interface
