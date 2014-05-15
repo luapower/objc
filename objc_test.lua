@@ -163,7 +163,6 @@ function test.inspect_nswindow()
 	objc.inspect_class'NSWindow'
 end
 
-
 function test.properties()
 	objc.load'Foundation'
 	objc.load'AppKit'
@@ -172,32 +171,21 @@ function test.properties()
 
 	local NSApp = objc.class('NSApp', 'NSApplication')
 	local nsapp = NSApp:sharedApplication()
-	nsapp.delegate = nsapp
+	objc.inspect_class'NSApplication'
+	nsapp:setDelegate(nsapp)
 end
 
 
 function test.classes()
-
-	--[[
-	test.selectors()
-	test.errors()
-	test.newclass()
-	test.inspect()
-	]]
-	test.inspect_nswindow()
-
-	--local objc.NSArray
-
-	--[[
-	objc.load('Foundation', 'nodeps')
-	objc.load('AppKit', 'nodeps')
-	objc.load('System', 'nodeps')
-	objc.load('CoreServices', 'nodeps')
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
 
 	--local pool = objc.NSAutoreleasePool:new()
 	local NSApp = objc.class('NSApp', 'NSApplication')
 	local nsapp = NSApp:sharedApplication()
-	nsapp.delegate = nsapp
+	nsapp:setDelegate(nsapp)
 
 	local NSWin = objc.class('NSWin', 'NSWindow')
 	objc.conforms('NSWin', 'NSWindowDelegate')

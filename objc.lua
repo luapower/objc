@@ -827,19 +827,19 @@ end
 local function find_method(cls, selname, inst)
 	local sel = selector(selname)
 	local meth = method(cls, sel, inst)
-	if not meth and not selname:find'[_%:]$' then --method not found, try again with a trailing '_'
+	if meth then return sel, meth end
+	if not selname:find'[_%:]$' then --method not found, try again with a trailing '_'
 		return find_method(cls, selname..'_', inst)
 	end
-	return sel, meth
 end
 
 local function find_conforming_method_type(cls, selname, inst)
 	local sel = selector(selname)
 	local mtype = conforming_method_type(cls, sel, inst)
-	if not mtype and not selname:find'[_%:]$' then --method not found, try again with a trailing '_'
+	if mtype then return sel, mtype end
+	if not selname:find'[_%:]$' then --method not found, try again with a trailing '_'
 		return find_conforming_method_type(cls, selname..'_', inst)
 	end
-	return sel, mtype
 end
 
 --class/instance method caller
@@ -1053,7 +1053,7 @@ local function set_instance_field(obj, field, val)
 		return
 	end
 	--look to set a writable instance property
-	local prop = property(obj, field)
+	local prop = property(obj.isa, field)
 	if prop then
 		local setter = property_setter(prop)
 		if setter then --not read-only
