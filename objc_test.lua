@@ -6,18 +6,17 @@ local pp = require'pp'
 io.stdout:setvbuf'no'
 io.stderr:setvbuf'no'
 
-local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
-local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
-local subprocess = false --run each bridgesupport test in a subprocess
-objc.debug.types = true
-objc.debug.deps = false --skip loading dependencies
-objc.debug.func_cdef = false --cdef functions immediately instead of lazily
+objc.debug.loadtypes = true
+objc.debug.loaddeps = false --skip loading dependencies
+objc.debug.lazyfuncs = true --cdef functions immediately instead of lazily
 objc.debug.errors = true
 objc.debug.ctypes = true
 objc.debug.load = true --no effect: we redefine objc.load
+objc.debug.retain = true
 objc.debug.release = true
 objc.debug.redef = true --report redefinitions (slower)
-objc.debug.methods = false
+objc.debug.methodtypes = false
+
 local default_test = 'classes'
 local default_test_args = {}--{'/System/Library/Frameworks/OpenGL.framework'}
 
@@ -25,6 +24,11 @@ local test = {} --{name = test_func}
 
 --test parsing of bridgesupport files.
 --works on Windows too - just copy your bridgesupport files into whatever you set `bsdir` above.
+
+local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
+local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
+local subprocess = false --run each bridgesupport test in a subprocess
+
 function test.bridgesupport(bsfile)
 
 	local function list_func(cmd)
@@ -134,25 +138,65 @@ function test.errors()
 	print(pcall(objc.class, 'NSObject'))
 	print(pcall(objc.class, genname'MyClass', 'MyUnknownClass'))
 	print(pcall(objc.class, genname'MyClass', 'NSObject <MyUnknownProtocol>'))
-
 end
 
 function test.newclass()
+	objc.load'Foundation'
+	--simple class
 	local cls = objc.class'MyClassX'
 	assert(tostring(cls) == 'MyClassX')
-
+	--TODO: test this
 	local cls = objc.class(genname'MyClass', 'NSArray')
-
-
-	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate>')
-
-
+	--TODO: test this
+	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate, NSLocking>')
 end
 
 function test.inspect()
+	objc.load'Foundation'
 	objc.inspect_protocol'NSFilePresenter'
+	objc.inspect_class'NSArray'
 	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate>')
 	objc.inspect_class(cls)
+end
+
+function test.refcount()
+	objc.load'Foundation'
+	local cls = objc.class(genname'MyClass', 'NSObject')
+	local inst, inst2, inst3
+
+	inst = cls:new()
+	assert(inst:retainCount() == 1)
+
+	inst2 = inst:retain() --same class, new cdata, new reference
+	assert(inst:retainCount() == 2)
+
+	inst3 = inst:retain()
+	assert(inst:retainCount() == 3)
+
+	inst3 = nil --release() on gc
+	collectgarbage()
+	assert(inst:retainCount() == 2)
+
+	inst3 = inst:retain()
+	assert(inst:retainCount() == 3)
+
+	inst:release() --manual release()
+	assert(inst:retainCount() == 2)
+
+	inst = nil --object already disowned by inst, refcount should not decrease
+	collectgarbage()
+	assert(inst2:retainCount() == 2)
+end
+
+function test.luavars()
+	objc.load'Foundation'
+	local cls = objc.class(genname'MyClass', 'NSObject')
+	local inst = cls:new()
+	print(inst:retainCount())
+	inst:retain()
+	inst:release()
+	--inst:dealloc()
+	--print(inst:retainCount())
 end
 
 function test.inspect_nswindow()
@@ -202,7 +246,6 @@ function test.classes()
 	nsapp:activateIgnoringOtherApps(true)
 	win:makeKeyAndOrderFront(nil)
 	nsapp:run()
-	]]
 end
 
 --cmdline interface

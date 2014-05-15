@@ -73,6 +73,7 @@ Protocol *objc_getProtocol(const char *name);
 const char *protocol_getName(Protocol *p);
 struct objc_method_description protocol_getMethodDescription(Protocol *p,
 	SEL aSel, BOOL isRequiredMethod, BOOL isInstanceMethod);
+BOOL class_addProtocol(Class cls, Protocol *protocol);
 
 //properties
 objc_property_t class_getProperty(Class cls, const char *name);
@@ -93,6 +94,8 @@ struct objc_method_description *protocol_copyMethodDescriptionList(Protocol *p,
 	BOOL isRequiredMethod, BOOL isInstanceMethod, unsigned int *outCount);
 objc_property_t *class_copyPropertyList(Class cls, unsigned int *outCount);
 objc_property_t *protocol_copyPropertyList(Protocol *proto, unsigned int *outCount);
+Protocol **class_copyProtocolList(Class cls, unsigned int *outCount);
+Protocol **protocol_copyProtocolList(Protocol *proto, unsigned int *outCount);
 
 //messages
 id objc_msgSend(id theReceiver, SEL theSelector, ...);
@@ -102,14 +105,15 @@ local C = ffi.C
 local objc = {C = C}
 
 objc.debug = {
-	types = true,          --load bridgesupport file
-	deps = false,          --load dependencies specified in the bridgesupport file (usually too many to be useful)
+	loadtypes = true,      --load bridgesupport file
+	loaddeps = false,      --load dependencies specified in the bridgesupport file (usually too many to be useful)
 	errors = true,         --log errors of any kind
 	cdefs = false,         --print cdefs to stdout (then you can grab them and make your own static cdef headers)
-	func_cdef = false,     --cdef functions at the time of parsing instead of lazily with a wrapper (see below)
-	methods = false,       --log method ctype parsing
+	lazyfuncs = true,      --cdef functions on the first call rather than at the time of parsing the xml (see below)
+	methodtypes = false,   --log method ctype parsing
 	load = false,          --log loaded frameworks
 	release = false,       --log relases with refcount
+	retain = false,        --log retains with refcount
 	redef = false,         --check incompatible redefinition attempts (makes parsing slower)
 	stats = {
 		errors = 0,         --number of cdef errors
@@ -227,12 +231,10 @@ end
 
 local structs = {} --{tag = true or ctype}
 
---('{tag="f1name"f1type...}', 'name') -> 'struct tag name' or just 'tag', depending on deftype.
---('(tag="f1name"f1type...)', 'name') -> 'union tag name' or just 'tag', depending on deftype.
---note: tag is the struct tag in the C struct namespace; name is the typedef name in the C global namespace.
---named structs are recursively cdef'ed and only a tag reference is returned for them.
---for anonymous structs the complete definition is returned instead.
-local function struct_ctype(s, name, deftype)
+--note: `tag` means the struct tag in the C struct namespace; `name` means the typedef name in the C global namespace.
+--for named structs only 'struct tag' is returned; for anonymous funcs the full 'struct {fields...}' is returned.
+--before returning, named structs are recursively cdef'ed (unless deftype ~= 'cdef' which skips this step).
+local function struct_ctype(s, name, deftype) --('{CGPoint="x"d"y"d}', 'NSPoint') -> 'struct CGPoint NSPoint'
 
 	--break the struct/union def. in its constituent parts: keyword, tag, fields
 	local kw, tag, fields = s:match'^(.)([^=]*)=?(.*).$' -- '{name=fields}'
@@ -246,7 +248,7 @@ local function struct_ctype(s, name, deftype)
 		return string.format('%s %s%s', kw, tag, optname(name))
 	end
 
-	if not tag or not defined(tag, structs) then --anonymous or not defined: parse it
+	if not tag or not defined(tag, structs) then --anonymous or not alreay defined: parse it
 
 		--parse the fields which come as '"name1"type1"name2"type2...'
 		local t = {}
@@ -346,6 +348,7 @@ local ctype_decoders = {
 
 --convert a runtime type encoding to a C type (as string)
 --deftype = 'cdef' means that named structs should be cdef'ed before returning.
+--deftype = 'retval' means it's a return-value type, so don't protect pointers with '(*name)'
 function type_ctype(s, name, deftype)
 	local decoder = assert(ctype_decoders[s:sub(1,1)], s)
 	return decoder(s, name, deftype)
@@ -364,13 +367,13 @@ local function method_ctype_string(s)
 		end
 	end
 	local func_ctype = string.format('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
-	if objc.debug.methods then
+	if objc.debug.methodtypes then
 		log('method_ctype', '%-20s %s', s, func_ctype)
 	end
 	return func_ctype
 end
 
-local method_ctype = memoize(function(s)
+local method_ctype = memoize(function(s) --caching to prevent ctype duplicates and avoid reparsing
 	return ffi.typeof(method_ctype_string(s))
 end)
 
@@ -485,9 +488,7 @@ endtag['function'] = function()
 	local cdecl = string.format('%s %s (%s%s);', ftag.retval, ftag.name, args, vararg)
 	local name = ftag.name
 	ftag = nil
-	if objc.debug.func_cdef then
-		cdef(name, globals, cdecl)
-	else
+	if objc.debug.lazyfuncs then
 		if redefined(name, globals, cdecl) then return end
 		--delay cdef'ing the function until the first call, to avoid polluting the C namespace with unused declarations.
 		--this is because in luajit2 can only hold as many as 64k ctypes total.
@@ -497,6 +498,8 @@ endtag['function'] = function()
 			rawset(objc, name, nil) --remove this wrapper; later calls will go to the C namespace directly.
 			return func(...)
 		end)
+	else
+		cdef(name, globals, cdecl)
 	end
 end
 
@@ -593,12 +596,12 @@ function objc.load(namepath, option)
 			ffi.load(path, true)
 		end
 	end
-	if objc.debug.types and option ~= 'notypes' and not objc.loaded_bs[basepath] then
+	if objc.debug.loadtypes and option ~= 'notypes' and not objc.loaded_bs[basepath] then
 		objc.loaded_bs[basepath] = true
 		--load the bridgesupport xml file which contains typedefs and constants which we can't get from the runtime.
 		local path = string.format('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
 		if canread(path) then
-			objc.load_bridgesuport(path, objc.debug.deps and option ~= 'nodeps')
+			objc.load_bridgesuport(path, objc.debug.loaddeps and option ~= 'nodeps')
 		end
 	end
 end
@@ -607,7 +610,7 @@ end
 
 --selectors
 
-local selector_object = memoize(function(name)
+local selector_object = memoize(function(name) --caching to prevent string creation each method call (worth it?)
 	--replace '_' with ':' except at the beginning
 	name = name:match('^_*') .. name:gsub('^_*', ''):gsub('_', ':')
 	return ptr(C.sel_registerName(name))
@@ -689,7 +692,12 @@ local function protocol_name(proto)
 	return ffi.string(C.protocol_getName(proto))
 end
 
---protocol methods
+function objc.conforms(cls, proto, ...) --allows inferring method types when creating methods at runtime!
+	C.class_addProtocol(class(cls), protocol(proto))
+	if ... then
+		objc.conforms(cls, ...)
+	end
+end
 
 --inst and required are optional filters: instance vs class method and required vs non-required.
 local function protocol_method_type(proto, sel, inst, required)
@@ -706,21 +714,6 @@ local function protocol_method_type(proto, sel, inst, required)
 	local desc = C.protocol_getMethodDescription(proto, sel, required, inst)
 	if desc.name == nil then return end
 	return ffi.string(desc.types)
-end
-
---class conforming to protocols (for inferring method types when creating methods at runtime)
-
-local class_protocols = memoize(function(cls)
-	return {}
-end)
-
-function objc.conforms(cls, proto, ...)
-	proto = protocol(proto)
-	cls = class(cls)
-	class_protocols(cls)[nptr(proto)] = proto
-	if ... then
-		objc.conforms(cls, ...)
-	end
 end
 
 --find a selector in conforming protocols and if found, return its type
@@ -755,16 +748,16 @@ local function property_name(prop)
 	return ffi.string(C.property_getName(prop))
 end
 
-local decoders = {
+local prop_attr_decoders = {
 	G = function(s, t) t.getter = s end,
 	S = function(s, t) t.setter = s end,
 	R = function(s, t) t.readonly = true end,
 }
-local property_attributes = memoize(function(prop) --we can't change prop. attrs at runtime so it's ok to memoize
+local property_attributes = memoize(function(prop) --caching to prevent parsing on each property access
 	local s = ffi.string(C.property_getAttributes(prop))
 	local attrs = {}
 	for k,v in (s..','):gmatch'(.)([^,]*),' do
-		local decode = decoders[k]
+		local decode = prop_attr_decoders[k]
 		if decode then decode(v, attrs) end
 	end
 	return attrs
@@ -846,10 +839,20 @@ end
 
 local _instance_vars = {} --{[nptr(obj)] = {var1 = val1, ...}}
 
-local function collect_object(obj)
+local function collect_object(obj) --note: assume that this will be called multiple times on the same obj!
 	obj:release()
-	_instance_vars[nptr(obj)] = nil --variables stay after obj:release() until the object is gc'ed
+	_instance_vars[nptr(obj)] = nil
 end
+
+--methods for which we should refrain from retaining the result object
+local noretain = {release=1, autorelease=1, retain=1, alloc=1, new=1, copy=1, mutableCopy=1}
+objc.debug.noretain = noretain --publish these, maybe the user might add more?
+
+--advanced sorcery note: ffi.gc() applies to cdata objects, not to the identities that they hold,
+--so if you get the same object from two different invocations, you now have two cdata and your finalizer
+--that you set with ffi.gc() will be called twice, each time when each cdata gets collected.
+
+--so it's ok to own each new cdata that retain() returns, as long as we disown it on release().
 
 local function method_caller(cls, selname, inst) --method caller based on a loose selector
 	local sel, method = find_method(cls, selname, inst)
@@ -859,26 +862,32 @@ local function method_caller(cls, selname, inst) --method caller based on a loos
 	local ctype = method_ctype(mtype)
 	local imp = ffi.cast(ctype, C.method_getImplementation(method))
 
-	local isalloc = selname:find'^alloc'
-	local isnew = selname == 'new'
-	local isrelease = selname == 'release'
+	local can_retain = not noretain[selname]
+	local is_release = selname == 'release' or selname == 'autorelease'
+	local must_disown = is_release or selname == 'dealloc'
 
 	return function(obj, ...) --note: obj is the class for a class method
 		local ok, ret = pcall(imp, ffi.cast(id_ctype, obj), sel, ...)
 		if not ok then
 			check(false, '[%s %s] %s\n%s', tostring(cls), tostring(sel), ret, debug.traceback())
 		end
-		if ret == nil then return nil end --NULL objects -> nil
-		if (isalloc or isnew) and ffi.istype(id_ctype, ret) then
-			ret = ret:retain()
-			if isalloc then
-				ret = ffi.gc(ret, collect_object)
-			end
-		elseif isrelease then
+		if is_release and objc.debug.release then
+			log('released', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
+		end
+		if must_disown then
 			ffi.gc(obj, nil) --prevent calling obj:release() again on gc
-			if objc.debug.release then
-				log('release_object', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
+		end
+		if ret == nil then
+			return nil --NULL -> nil
+		end
+		if can_retain and ffi.istype(id_ctype, ret) then
+			ret = ret:retain()
+			if objc.debug.retain then
+				log('retained', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
 			end
+		end
+		if not must_disown and ffi.istype(id_ctype, ret) then
+			ret = ffi.gc(ret, collect_object)
 		end
 		return ret
 	end
@@ -886,13 +895,13 @@ end
 
 local cm_cache = {}
 
-local class_method_caller = memoize2(function(cls, selname)
+local class_method_caller = memoize2(function(cls, selname) --caching to prevent creating a new caller on each call
 	return method_caller(cls, selname, false)
 end, cm_cache)
 
 local im_cache = {}
 
-local instance_method_caller = memoize2(function(cls, selname)
+local instance_method_caller = memoize2(function(cls, selname) --caching to prevent creating a new caller on each call
 	return method_caller(cls, selname, true)
 end, im_cache)
 
@@ -961,8 +970,8 @@ local function get_class_field(cls, field)
 			return caller(cls)
 		end
 	end
-	--look for an instance method or a class method
-	return instance_method_caller(cls, field) or class_method_caller(cls, field)
+	--look for a class method
+	return class_method_caller(cls, field)
 end
 
 --try different things in order, to create the effect of inherited namespaces.
@@ -1040,8 +1049,8 @@ local function get_instance_field(obj, field)
 			return caller(obj)
 		end
 	end
-	--look for an instance method or a class method
-	return instance_method_caller(obj.isa, field) or class_method_caller(obj.isa, field)
+	--look for an instance method
+	return instance_method_caller(obj.isa, field)
 end
 
 --try different things in order, to create the effect of inherited namespaces.
@@ -1068,13 +1077,13 @@ local function set_instance_field(obj, field, val)
 	set_instance_var(obj, field, val)
 end
 
-local function object_description(obj)
+local function object_tostring(obj)
 	if obj == nil then return 'nil' end
-	return ffi.string(obj:description():UTF8String())
+	return string.format('<%s>0x%x', class_name(obj.isa), nptr(obj))
 end
 
 ffi.metatype('struct objc_object', {
-	__tostring = object_description,
+	__tostring = object_tostring,
 	__index = get_instance_field,
 	__newindex = set_instance_field,
 })
@@ -1089,40 +1098,33 @@ setmetatable(objc, {
 
 --inspection -------------------------------------------------------------------------------------------------------------
 
---routines
+--listers
 
-local function instance_methods(cls, methods) --returns {method1, ...}; inherited methods not included
-	methods = methods or {}
+local function list(listfunc, subj, t) --call a C list function f(subj, count) and return the results in a lua table
+	t = t or {}
 	local count = ffi.new'unsigned int[1]'
-	local mlist = C.class_copyMethodList(cls, count)
+	local lst = listfunc(subj, count)
 	for i = 0, count[0]-1 do
-		table.insert(methods, mlist[i])
+		table.insert(t, lst[i])
 	end
-	C.free(mlist)
-	return methods
+	C.free(lst)
+	return t
 end
 
-local function class_methods(cls, methods) --inherited methods not included
+local function instance_methods(cls, methods) --returns {method1, ...}; inherited methods not included
+	return list(C.class_copyMethodList, cls, methods)
+end
+
+local function class_methods(cls, methods) --returns {method1, ...}; inherited methods not included
 	return instance_methods(metaclass(cls), methods)
 end
 
-local function property_list(get_plist, obj, props) --returns {prop1, ...}
-	props = props or {}
-	local count = ffi.new'unsigned int[1]'
-	local plist = get_plist(obj, count)
-	for i = 0, count[0]-1 do
-		table.insert(props, plist[i])
-	end
-	C.free(plist)
-	return props
+local function properties(cls, props) --returns {prop1, ...}; inherited properties not included
+	return list(C.class_copyPropertyList, cls, props)
 end
 
-local function properties(cls, props) --inherited properties not included
-	return property_list(C.class_copyPropertyList, cls, props)
-end
-
-local function protocol_properties(proto, props) --inherited properties not included
-	return property_list(C.protocol_copyPropertyList, proto, props)
+local function protocol_properties(proto, props) --returns {prop1, ...}; inherited properties not included
+	return list(C.protocol_copyPropertyList, proto, props)
 end
 
 local function protocol_methods(proto, inst, required, methods) --returns {sel, ...}; inherited methods not included
@@ -1140,10 +1142,18 @@ local function protocol_methods(proto, inst, required, methods) --returns {sel, 
 	local count = ffi.new'unsigned int[1]'
 	local desc = C.protocol_copyMethodDescriptionList(proto, required, inst, count)
 	for i = 0, count[0]-1 do
-		table.insert(methods, desc[i].name) --name is actually a SEL
+		table.insert(methods, desc[i].name) --name is a SEL object
 	end
 	C.free(desc)
 	return methods
+end
+
+local function protocols(cls)
+	return list(C.class_copyProtocolList, cls)
+end
+
+local function protocol_protocols(cls)
+	return list(C.protocol_copyProtocolList, cls)
 end
 
 --pretty helpers
@@ -1196,7 +1206,7 @@ local function inspect_methods(title, methods)
 	end
 end
 
-local function superclasses(cls)
+local function superclass_names(cls)
 	local t = {}
 	local super = cls
 	while true do
@@ -1204,21 +1214,35 @@ local function superclasses(cls)
 		if not super then break end
 		t[#t+1] = tostring(super)
 	end
-	return t
+	return #t > 0 and string.format(' (%s)', table.concat(t, ' <- ')) or ''
+end
+
+local function protocol_names(protocols)
+	local t = {}
+	for i = 1, #protocols do
+		t[#t+1] = protocol_name(protocols[i])
+	end
+	return #t > 0 and string.format(' <%s>', table.concat(t, ', ')) or ''
 end
 
 --inspection api
 
 function objc.inspect_protocol(proto)
 	proto = protocol(proto)
-	header('Protocol %s', protocol_name(proto))
+	header('Protocol %s%s', protocol_name(proto), protocol_names(protocol_protocols(proto)))
 	inspect_properties(protocol_properties(proto))
 	inspect_protocol_methods(proto, protocol_methods(proto))
 end
 
+function objc.inspect_conforms(cls)
+	for i,proto in ipairs(protocols(cls)) do
+		--
+	end
+end
+
 function objc.inspect_class(cls)
 	cls = class(cls)
-	header('Class %s (%s)', class_name(cls), table.concat(superclasses(cls), ' <- '))
+	header('Class %s%s%s', class_name(cls), superclass_names(cls), protocol_names(protocols(cls)))
 	inspect_properties(properties(cls))
 	inspect_methods('Instance Methods:', instance_methods(cls))
 	inspect_methods('Class Methods:', class_methods(cls))
