@@ -6,29 +6,27 @@ local pp = require'pp'
 io.stdout:setvbuf'no'
 io.stderr:setvbuf'no'
 
-objc.debug.loadtypes = true
-objc.debug.loaddeps = false --skip loading dependencies
-objc.debug.lazyfuncs = true --cdef functions immediately instead of lazily
-objc.debug.errors = true
-objc.debug.ctypes = true
-objc.debug.load = true --no effect: we redefine objc.load
-objc.debug.retain = true
-objc.debug.release = true
-objc.debug.redef = true --report redefinitions (slower)
-objc.debug.methodtypes = false
+--test options
 
-local default_test = 'classes'
+local default_test = 'bridgesupport'
 local default_test_args = {}--{'/System/Library/Frameworks/OpenGL.framework'}
+
+local subprocess = false --run each bridgesupport test in a subprocess
+objc.debug.lazyfuncs = false
+objc.debug.checkredef = true
+objc.debug.printdecl = false
+objc.debug.loaddeps = false
+objc.debug.loadtypes = true
+
+local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
+local luajit = ffi.os == 'Windows' and 'luajit' or './luajit' --luajit command for subprocess running
+
+--test namespace
 
 local test = {} --{name = test_func}
 
 --test parsing of bridgesupport files.
 --works on Windows too - just copy your bridgesupport files into whatever you set `bsdir` above.
-
-local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
-local luajit = ffi.os == 'Windows' and 'luajit' or './luajit'
-local subprocess = false --run each bridgesupport test in a subprocess
-
 function test.bridgesupport(bsfile)
 
 	local function list_func(cmd)
@@ -77,18 +75,18 @@ function test.bridgesupport(bsfile)
 				--load the dylib first (needed for function aliases)
 				local dpath = path:gsub('Resources/BridgeSupport/.*$', name)
 				if glue.fileexists(dpath) then
-					ffi.load(dpath, true)
+					pcall(ffi.load, dpath, true)
 				end
 
 				--load the dylib with inlines first (needed for function aliases)
 				local dpath = path:gsub('bridgesupport$', 'dylib')
 				print(path, dpath)
 				if glue.fileexists(dpath) then
-					ffi.load(dpath, true)
+					pcall(ffi.load, dpath, true)
 				end
 			end
 
-			objc.load_bridgesuport(path)
+			objc.debug.load_bridgesupport(path)
 			n = n + 1
 			print(n, '', name)
 		else
@@ -96,9 +94,15 @@ function test.bridgesupport(bsfile)
 		end
 	end
 
+	local function status()
+		pp('errors', objc.debug.errcount)
+		print('globals: '..objc.debug.cnames.global[1])
+		print('structs: '..objc.debug.cnames.struct[1])
+	end
+
 	if bsfile then
 		objc.load(bsfile)
-		pp(objc.debug.stats)
+		status()
 	else
 		for bsfile in bsfiles() do
 			if bsfile:match'Python' then
@@ -111,7 +115,7 @@ function test.bridgesupport(bsfile)
 					objc.load(bsfile)
 				end
 				if not subprocess then
-					pp(objc.debug.stats)
+					status()
 				end
 			end
 		end
@@ -127,10 +131,10 @@ local function genname(prefix)
 end
 
 function test.selectors()
-	assert(tostring(objc.SEL'se_lec_tor') == 'se:lec:tor')
-	assert(tostring(objc.SEL'se_lec_tor_') == 'se:lec:tor:')
-	assert(tostring(objc.SEL'__se_lec_tor') == '__se:lec:tor')
-	assert(tostring(objc.SEL'__se:lec:tor:') == '__se:lec:tor:')
+	assert(tostring(objc.selector'se_lec_tor') == 'se:lec:tor')
+	assert(tostring(objc.selector'se_lec_tor_') == 'se:lec:tor:')
+	assert(tostring(objc.selector'__se_lec_tor') == '__se:lec:tor')
+	assert(tostring(objc.selector'__se:lec:tor:') == '__se:lec:tor:')
 end
 
 function test.errors()
@@ -142,21 +146,15 @@ end
 
 function test.newclass()
 	objc.load'Foundation'
-	--simple class
-	local cls = objc.class'MyClassX'
+	local cls = objc.class('MyClassX', false) --root class
 	assert(tostring(cls) == 'MyClassX')
-	--TODO: test this
-	local cls = objc.class(genname'MyClass', 'NSArray')
-	--TODO: test this
-	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate, NSLocking>')
-end
-
-function test.inspect()
-	objc.load'Foundation'
-	objc.inspect_protocol'NSFilePresenter'
-	objc.inspect_class'NSArray'
-	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate>')
-	objc.inspect_class(cls)
+	assert(not objc.superclass(cls))
+	local cls = objc.class(genname'MyClass', 'NSArray') --derived class
+	assert(tostring(objc.superclass(cls)) == 'NSArray')
+	local cls = objc.class(genname'MyClass', 'NSArray <NSStreamDelegate, NSLocking>') --derived + conforming
+	assert(tostring(objc.superclass(cls)) == 'NSArray')
+	assert(objc.class_conforms(cls, objc.protocol'NSStreamDelegate') == true)
+	assert(objc.class_conforms(cls, objc.protocol'NSLocking') == true)
 end
 
 function test.refcount()
@@ -213,13 +211,35 @@ function test.luavars()
 	assert(inst.myclassvar == 'doh2') --all we did was to shadow the class var with an instance var
 end
 
-function test.inspect_nswindow()
+function test.override()
 	objc.load'Foundation'
-	objc.load'AppKit'
-	objc.load'System'
-	objc.load'CoreServices'
-	objc.inspect_class'NSWindow'
+	local classname = genname'MyClass'
+	local cls = objc.class(classname, 'NSObject')
+
+	--objc.debug.logtopics.method_ctype = true
+
+	local s = 'hello-instance'
+	function cls:description() --override the instance method
+		return objc.NSString:alloc():initWithUTF8String(ffi.cast('char*', s))
+	end
+	assert(ffi.string(cls:description():UTF8String()) == classname) --use original class method
+	local obj = cls:new()
+	assert(ffi.string(obj:description():UTF8String()) == s) --use overriden
+
+	--objc.debug.invalidate_class(cls)
+
+	local s = 'hello-class'
+	local metacls = objc.metaclass(cls)
+	--print(ffi.cast('uintptr_t', metacls), ffi.cast('uintptr_t', cls))
+	function metacls:description() --override the class method
+		return objc.NSString:alloc():initWithUTF8String(ffi.cast('char*', s))
+	end
+	assert(ffi.string(cls:description():UTF8String()) == s) --use overriden class method
+
 end
+
+
+
 
 function test.properties()
 	objc.load'Foundation'
@@ -229,10 +249,21 @@ function test.properties()
 
 	local NSApp = objc.class('NSApp', 'NSApplication')
 	local nsapp = NSApp:sharedApplication()
-	objc.inspect_class'NSApplication'
+	objc.inspect.class'NSApplication'
 	nsapp:setDelegate(nsapp)
 end
 
+function test.methods()
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
+
+	local NSApp = objc.class('NSApp', 'NSApplication')
+	local nsapp = NSApp:sharedApplication()
+	objc.inspect.class'NSApplication'
+	nsapp:setDelegate(nsapp)
+end
 
 function test.classes()
 	objc.load'Foundation'
@@ -260,6 +291,27 @@ function test.classes()
 	nsapp:activateIgnoringOtherApps(true)
 	win:makeKeyAndOrderFront(nil)
 	nsapp:run()
+end
+
+function test.inspect(cmd, ...)
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
+	objc.inspect[cmd](...)
+end
+
+function test.inspect_class()
+	objc.load'Foundation'
+	objc.load'AppKit'
+	objc.load'System'
+	objc.load'CoreServices'
+	objc.inspect.class'NSWindow'
+end
+
+function test.inspect_protocol()
+	objc.load'Foundation'
+	objc.inspect.protocol'NSFilePresenter'
 end
 
 --cmdline interface
