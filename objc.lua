@@ -168,7 +168,7 @@ local function citer(a) --return an iterator for a null-terminated C array
 	return function()
 		if a == nil then return end
 		i = i + 1
-		if a[i] == nil then return nil end
+		if a[i] == nil then return end
 		return a[i]
 	end
 end
@@ -569,6 +569,21 @@ function tag.function_alias(attrs) --these tags always come after the 'function'
 	end
 end
 
+local new_informal_protocol --fw. decl.
+
+local proto --informal_protocol object for the current 'informal_protocol' tag
+
+function tag.informal_protocol(attrs)
+	proto = new_informal_protocol(attrs.name, attrs.class_method ~= 'true')
+end
+
+function tag.method(attrs)
+	if not proto then return end
+	local s = attrs[typekey] or attrs.type
+	if not s then return end --type not available on this platform
+	proto._methods[attrs.selector] = s
+end
+
 function xml.start_tag(name, attrs)
 	if tag[name] then tag[name](attrs) end
 end
@@ -627,7 +642,7 @@ function load_framework(namepath, option) --load a framework given its name or f
 	local basepath, name = find_framework(namepath)
 	check(basepath, 'framework not found %s', namepath)
 	if not loaded[basepath] then
-		--load the framework binary which contains classes and functions
+		--load the framework binary which contains classes, functions and protocols
 		if canread(path) then
 			local path = _('%s/%s', basepath, name)
 			ffi.load(path, true)
@@ -669,34 +684,40 @@ local function selector_name(sel)
     return ffi.string(ffi.C.sel_getName(sel))
 end
 
---protocols
+ffi.metatype('struct objc_selector', {
+	__tostring = selector_name,
+	__index = {
+		name = selector_name,
+	},
+})
 
-local function protocols() --list all loaded protocols
+--formal protocols
+
+local function formal_protocols()
 	return citer(own(C.objc_copyProtocolList(nil)))
 end
 
-local function protocol(name) --protocol by name
-	if type(name) ~= 'string' then return name end
-	return check(ptr(C.objc_getProtocol(name)), 'unknown protocol %s', name)
+local function formal_protocol(name)
+	return ptr(C.objc_getProtocol(name))
 end
 
-local function protocol_name(proto)
+local function formal_protocol_name(proto)
 	return ffi.string(C.protocol_getName(proto))
 end
 
-local function protocol_protocols(proto) --protocols of superprotocols not included
+local function formal_protocol_protocols(proto) --protocols of superprotocols not included
 	return citer(own(C.protocol_copyProtocolList(proto, nil)))
 end
 
-local function protocol_properties(proto) --inherited properties not included
+local function formal_protocol_properties(proto) --inherited properties not included
 	return citer(own(C.protocol_copyPropertyList(proto, nil)))
 end
 
-local function protocol_property(proto, name, required, readonly) --looks in superprotocols too
+local function formal_protocol_property(proto, name, required, readonly) --looks in superprotocols too
 	return ptr(C.protocol_getProperty(proto, name, required, readonly))
 end
 
-local function protocol_methods(proto, inst, required) --inherited methods not included
+local function formal_protocol_methods(proto, inst, required) --inherited methods not included
 	local desc = own(C.protocol_copyMethodDescriptionList(proto, required, inst, nil))
 	local i = -1
 	return function()
@@ -707,20 +728,86 @@ local function protocol_methods(proto, inst, required) --inherited methods not i
 	end
 end
 
-local function protocol_method_type(proto, sel, inst, required) --looks in superprotocols too
+local function formal_protocol_method_type(proto, sel, inst, required) --looks in superprotocols too
 	local desc = C.protocol_getMethodDescription(proto, sel, required, inst)
 	if desc.name == nil then return end
 	return ffi.string(desc.types)
 end
 
---call f(proto, ...) for proto and all superprotocols recursively. stops when f() returns something.
-local function protocol_search(proto, f, ...)
-	local ret = f(proto, ...)
-	if ret ~= nil then return ret end
-	for proto in protocol_protocols(proto) do
-		local ret = protocol_search(f, ...)
-		if ret ~= nil then return ret end
-	end
+ffi.metatype('struct Protocol', {
+	__tostring = formal_protocol_name,
+	__index = {
+		name        = formal_protocol_name,
+		protocols   = formal_protocol_protocols,
+		properties  = formal_protocol_properties,
+		property    = formal_protocol_property,
+		methods     = formal_protocol_methods,
+		method_type = formal_protocol_method_type,
+	},
+})
+
+--informal protocols (must have the exact same API as formal protocols)
+
+local _informal_protocols = {} --{name = proto}
+local infprot = {}
+local infprot_meta = {__index = infprot}
+
+local function informal_protocols()
+	return pairs(_informal_protocols)
+end
+
+local function informal_protocol(name)
+	return _informal_protocols[name]
+end
+
+function new_informal_protocol(name, inst)
+	if formal_protocol(name) then return end --prevent needless duplication of formal protocols
+	local proto = setmetatable({_name = name, _inst = inst, _methods = {}}, infprot_meta)
+	_informal_protocols[name] = proto
+	return proto
+end
+
+function infprot:name()
+	return self._name
+end
+
+function noop() return end
+function infprot:protocols()
+	return noop
+end
+
+function infprot:properties()
+	return noop
+end
+
+infprot.property = noop
+
+function infprot:methods()
+	return pairs(self._methods)
+end
+
+function infprot:method_type(sel, inst, required)
+	if required then return end --by definition, informal protocols do not contain required methods
+	if self._inst ~= inst then return end
+	return self._methods[selector_name(sel)]
+end
+
+--all protocols
+
+local function protocols() --list all loaded protocols
+	return coroutine.wrap(function()
+		for proto in formal_protocols() do
+			coroutine.yield(proto)
+		end
+		for name, proto in informal_protocols() do
+			coroutine.yield(proto)
+		end
+	end)
+end
+
+local function protocol(name) --protocol by name
+	if type(name) ~= 'string' then return name end
+	return check(formal_protocol(name) or informal_protocol(name), 'unknown protocol %s', name)
 end
 
 --properties
@@ -780,6 +867,18 @@ local function property_ivar(prop)
 	return property_attrs(prop).ivar
 end
 
+ffi.metatype('struct objc_property', {
+	__tostring = property_name,
+	__index = {
+		name     = property_name,
+		getter   = property_getter,
+		setter   = property_setter,
+		ctype    = property_ctype,
+		readonly = property_readonly,
+		ivar     = property_ivar,
+	},
+})
+
 --methods
 
 local function method_type(method)
@@ -805,6 +904,18 @@ end
 local function method_implementation(method)
 	return ffi.cast(method_object_ctype(method), C.method_getImplementation(method))
 end
+
+ffi.metatype('struct objc_method', {
+	__tostring = method_name,
+	__index = {
+		type           = method_type,
+		selector       = method_selector,
+		name           = method_name,
+		ctype_string   = method_object_ctype_string,
+		ctype          = method_object_ctype,
+		implementation = method_implementation,
+	},
+})
 
 --classes
 
@@ -881,16 +992,41 @@ end
 
 --class protocols
 
+local class_informal_protocols = {} --{[nptr(cls)] = {name = informal_protocol,...}}
+
 local function class_protocols(cls) --does not include protocols of superclasses
-	return citer(own(C.class_copyProtocolList(cls, nil)))
+	return coroutine.wrap(function()
+		for proto in citer(own(C.class_copyProtocolList(cls, nil))) do
+			coroutine.yield(proto)
+		end
+		local t = class_informal_protocols[nptr(cls)]
+		if not t then return end
+		for name, proto in pairs(t) do
+			coroutine.yield(proto)
+		end
+	end)
 end
 
 local function class_conforms(cls, proto)
-	return C.class_conformsToProtocol(cls, protocol(proto)) == 1
+	if C.class_conformsToProtocol(cls, protocol(proto)) == 1 then
+		return true
+	end
+	local t = class_informal_protocols[nptr(cls)]
+	return t and t[protocol(proto):name()] and true or false
 end
 
 function class_add_protocols(cls, proto, ...)
-	C.class_addProtocol(class(cls), protocol(proto))
+	proto = protocol(proto)
+	if type(proto) == 'table' then
+		local t = class_informal_protocols[nptr(cls)]
+		if not t then
+			t = {}
+			class_informal_protocols[nptr(cls)] = t
+		end
+		t[proto:name()] = proto
+	else
+		C.class_addProtocol(class(cls), proto)
+	end
 	if ... then
 		class_add_protocols(cls, ...)
 	end
@@ -900,8 +1036,8 @@ end
 function conforming_method_type(cls, sel, inst)
 	for proto in class_protocols(cls) do
 		local mtype =
-			protocol_method_type(proto, sel, inst, false) or
-			protocol_method_type(proto, sel, inst, true)
+			proto:method_type(sel, inst, false) or
+			proto:method_type(sel, inst, true)
 		if mtype then
 			return mtype
 		end
@@ -995,6 +1131,16 @@ end
 local function ivar_set_value(obj, name, ivar, val)
 	ffi.cast(ivar_ctype(obj.isa, name, ivar), obj + ivar_offset(ivar))[0] = val
 end
+
+ffi.metatype('struct objc_ivar', {
+	__tostring = ivar_name,
+	__index = {
+		name = ivar_name,
+		type = ivar_type,
+		offset = ivar_offset,
+		ctype = ivar_ctype_string,
+	},
+})
 
 --class/instance lua vars
 
@@ -1386,95 +1532,6 @@ local function Obj(v) -- converts a lua value to an objc object representing tha
 	return nil
 end
 
---inspection -------------------------------------------------------------------------------------------------------------
-
---pretty helpers
-
-local function p(...) --formatted line
-	print(_(...))
-end
-
-local function hr() --horizontal line
-	print(('-'):rep(100))
-end
-
-local function header(...) --formatted header
-	print''
-	hr'+'
-	p('| '.._(...))
-	hr'+'
-end
-
-local comp = memoize(function(getname)
-	return function(a, b)
-		return getname(a) < getname(b)
-	end
-end)
-local function sorta(a, getname) --sort a C array by name
-	local t = {}
-	for i,e in apairs(a) do
-		t[#t+1] = e
-	end
-	table.sort(t, comp(getname or tostring))
-	return t
-end
-
---pretty chunks
-
-local function inspect_properties(props)
-	if not props then return end
-	p('\n%-40s %-20s %-40s %-40s', 'Properties:', 'ctype', 'getter', 'setter')
-	hr()
-	for i,prop in ipairs(sorta(props)) do
-		p('%-40s %-20s %-40s %-40s', property_name(prop),
-			type_ctype(property_ctype(prop)),
-			property_getter(prop),
-			property_setter(prop) or 'n/a')
-	end
-end
-
-local function inspect_method_types(title, proto, types)
-	if not next(types) then return end
-	p('\n%-60s %s', title, 'ctype')
-	hr()
-	local t = {}
-	for name in pairs(types) do
-		t[#t+1] = name
-	end
-	table.sort(t)
-	for i,name in ipairs(t) do
-		p('%-60s %s', name, method_ctype_string(types[name]))
-	end
-end
-
-local function inspect_methods(title, methods)
-	if not methods then return end
-	p('\n%-60s %s', title, 'ctype')
-	hr()
-	for meth in methods do
-		p('%-60s %s', method_name(meth), method_ctype_string(meth))
-	end
-end
-
-local function protocols_spec(protocols)
-	local t = {}
-	for i,proto in apairs(protocols) do
-		t[#t+1] = protocol_name(proto) .. protocols_spec(protocol_protocols(proto))
-	end
-	return #t > 0 and _(' <%s>', table.concat(t, ', ')) or ''
-end
-
-local function class_spec(cls, indent)
-	indent = indent or 1
-	local super_spec = superclass(cls) and
-		_('\n|%s<- %s', ('\t'):rep(indent), class_spec(superclass(cls), indent + 1)) or ''
-	return class_name(cls) .. protocols_spec(class_protocols(cls)) .. super_spec
-end
-
-local function protocol_spec(proto)
-	return protocol_name(proto) .. protocols_spec(protocol_protocols(proto))
-end
-
 --publish everything -----------------------------------------------------------------------------------------------------
 
 objc.C = C
@@ -1483,60 +1540,6 @@ objc.load = load_framework
 
 objc.type_ctype = type_ctype
 objc.method_ctype = method_ctype_string
-
-ffi.metatype('struct objc_selector', {
-	__tostring = selector_name,
-	__index = {
-		name = selector_name,
-	},
-})
-
-ffi.metatype('struct Protocol', {
-	__tostring = protocol_name,
-	__index = {
-		name = protocol_name,
-		protocols = protocol_protocols,
-		properties = protocol_properties,
-		property = protocol_property,
-		methods = protocol_methods,
-		method_type = protocol_method_type,
-		search = protocol_search,
-	},
-})
-
-ffi.metatype('struct objc_property', {
-	__tostring = property_name,
-	__index = {
-		name = property_name,
-		getter = property_getter,
-		setter = property_setter,
-		ctype = property_ctype,
-		readonly = property_readonly,
-		ivar = property_ivar,
-	},
-})
-
-ffi.metatype('struct objc_method', {
-	__tostring = method_name,
-	__index = {
-		type = method_type,
-		selector = method_selector,
-		name = method_name,
-		ctype_string = method_object_ctype_string,
-		ctype = method_object_ctype,
-		implementation = method_implementation,
-	},
-})
-
-ffi.metatype('struct objc_ivar', {
-	__tostring = ivar_name,
-	__index = {
-		name = ivar_name,
-		type = ivar_type,
-		offset = ivar_offset,
-		ctype = ivar_ctype_string,
-	},
-})
 
 local function objc_protocols(cls)
 	if not cls then

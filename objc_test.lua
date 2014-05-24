@@ -386,29 +386,32 @@ function test.windows()
 	objc.load'AppKit'
 
 	local pool = objc.NSAutoreleasePool:new()
-	local NSApp = objc.class('NSApp', 'NSApplication')
+	local NSApp = objc.class('NSApp', 'NSApplication <NSApplicationDelegate>')
 
 	objc.debug.logtopics.add_class_method = true
 
-	--because the protocol NSApplicationDelegate is not in the runtime, we have to add methods to NSApp manually:
+	--we need to add methods to the class before creating any objects!
+	--note: NSApplicationDelegate is an informal protocol.
 
-	objc.addmethod(NSApp, 'applicationShouldTerminateAfterLastWindowClosed:', function()
+	function NSApp:applicationShouldTerminateAfterLastWindowClosed()
 		print'last window closed...'
 		return true
-	end, 'B@:@')
+	end
 
-	objc.addmethod(NSApp, 'applicationShouldTerminate:', function()
+	function NSApp:applicationShouldTerminate()
 		print'terminating...'
 		return true
-	end, 'B@:@')
+	end
 
 	local app = NSApp:sharedApplication()
 	app:setDelegate(app)
 	app:setActivationPolicy(objc.NSApplicationActivationPolicyRegular)
 
-	local NSWin = objc.class('NSWin', 'NSWindow', 'NSWindowDelegate')
+	local NSWin = objc.class('NSWin', 'NSWindow <NSWindowDelegate>')
 
 	--we need to add methods to the class before creating any objects!
+	--note: NSWindowDelegate is a formal protocol.
+
 	function NSWin:windowWillClose()
 		print'window will close...'
 	end
