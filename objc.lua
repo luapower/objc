@@ -1526,6 +1526,8 @@ local function Obj(v) -- converts a lua value to an objc object representing tha
 		else
 			return NSArr(v)
 		end
+	elseif type(v) == 'function' then
+		return block(v)
 	elseif type(v) == 'cdata' then
 		return ffi.cast(id_ctype, v)
 	end
