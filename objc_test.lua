@@ -249,9 +249,8 @@ function test.luavars()
 	inst = nil
 	collectgarbage()
 	assert(inst2.myinstvar == 'DOH') --1 ref
-	inst2:release()
-	assert(inst2.myinstvar == nil) --0 refs; instance gone, vars gone
-	assert(inst2.myclassvar == 'doh2') --class vars still there
+	inst2:release() --0 refs; instance gone, vars gone (no way to test, memory was freed)
+	assert(cls.myclassvar == 'doh2') --class vars still there
 
 	print'ok'
 end
@@ -299,7 +298,11 @@ function test.ivars()
 
 	print_ivars(obj:class())
 
-	assert(ffi.typeof(obj.time) == ffi.typeof'long long')
+	if ffi.abi'64bit' then
+		assert(ffi.typeof(obj.time) == ffi.typeof'long long')
+	else
+		assert(type(obj.time) == 'number')
+	end
 	assert(type(obj.mode) == 'number') --unsigned short
 	assert(ffi.typeof(obj.flags) == ffi.typeof(obj.flags)) --anonymous struct (assert that it was cached)
 

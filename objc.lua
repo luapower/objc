@@ -106,7 +106,7 @@ id objc_msgSend(id theReceiver, SEL theSelector, ...);
 local C = ffi.C                               --C namespace
 local P = setmetatable({}, {__index = _G})    --private namespace
 local objc = {}                               --public namespace
-setfenv(1, P)
+setfenv(1, P)                                 --non-locals go in P
 
 --helpers ----------------------------------------------------------------------------------------------------------------
 
