@@ -130,6 +130,13 @@ local function own(p) --own a malloc()'ed pointer
 	return p ~= nil and ffi.gc(p, C.free) or nil
 end
 
+local function csymbol_(name) return C[name] end
+local function csymbol(name)
+	local ok, sym = pcall(csymbol_, name)
+	if not ok then return end
+	return sym
+end
+
 local function memoize(func, cache) --special memoize that works with pointer arguments too
 	cache = cache or {}
 	return function(input)
@@ -547,25 +554,22 @@ endtag['function'] = function()
 	end
 end
 
-local function getsym(name) return C[name] end
-
 function tag.function_alias(attrs) --these tags always come after the 'function' tags
 	local name = attrs.name
 	local original = attrs.original
 	if lazyfuncs then
-		local ok, func = pcall(getsym, original)
-		if ok then
-			rawset(objc, name, fctype)
-		else
-			err('alias', 'symbol not found %s for %s', original, name)
-		end
-	else
 		--delay getting a cdef to the original function until the first call to the alias
 		rawset(objc, name, function(...)
 			local func = C[original]
 			rawset(objc, name, func) --replace this wrapper with the original function
 			return func(...)
 		end)
+	else
+		if csymbol(original) then
+			rawset(objc, name, C[original])
+		else
+			err('alias', 'symbol not found %s for %s', original, name)
+		end
 	end
 end
 
@@ -1582,7 +1586,7 @@ objc.block = block
 
 setmetatable(objc, {
 	__index = function(t, k)
-		return class(k) or C[k]
+		return class(k) or csymbol(k)
 	end,
 })
 
