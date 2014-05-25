@@ -8,15 +8,14 @@ io.stderr:setvbuf'no'
 
 --test options
 
-local default_test --= 'bridgesupport'
-local default_test_args = {}--{'/System/Library/Frameworks/OpenGL.framework'}
-
 local subprocess = true --run each bridgesupport test in a subprocess
 objc.debug.lazyfuncs = false
 objc.debug.checkredef = true
 objc.debug.printcdecl = false
 objc.debug.loaddeps = true
 objc.debug.loadtypes = true
+objc.debug.logtopics.method_call = true
+objc.debug.logtopics.add_class_method = true
 
 local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
 local luajit = ffi.os == 'Windows' and 'luajit' or './luajit' --luajit command for subprocess running
@@ -268,8 +267,6 @@ function test.override()
 	local instdesc = 'hello-instance'
 	local classdesc = 'hello-class'
 
-	objc.debug.logtopics.method_ctype = true
-
 	function cls:description() --override the instance method
 		return objc.NSString:alloc():initWithUTF8String(instdesc)
 	end
@@ -293,8 +290,7 @@ function test.ivars()
 
 	local function print_ivars(cls)
 		for ivar in objc.ivars(cls) do
-			print(cls, ivar:name(), tonumber(ivar:offset()), ivar:type())
-			print('', ivar:ctype())
+			print(cls, ivar:name(), tonumber(ivar:offset()), ivar:type(), ivar:ctype())
 		end
 	end
 
@@ -388,14 +384,44 @@ function test.protocols()
 	end
 end
 
+function test.tolua()
+	objc.load'Foundation'
+
+	local n = objc.toobj(123.5)
+	assert(objc.issubclass(n.isa, objc.NSNumber))
+	assert(objc.tolua(n) == 123.5)
+
+	local s = objc.toobj'hello'
+	assert(objc.issubclass(s.isa, objc.NSString))
+	assert(objc.tolua(s) == 'hello')
+
+	local a = {1,2,6,7}
+	local t = objc.toobj(a)
+	assert(t:count() == #a)
+	for i=1,#a do
+		assert(t:objectAtIndex(i-1):doubleValue() == a[i])
+	end
+	a = objc.tolua(t)
+	assert(#a == 4)
+	assert(a[3] == 6)
+
+	local d = {a = 1, b = 'baz', d = {1,2,3}, [{x=1}] = {y=2}}
+	local t = objc.toobj(d)
+	assert(t:count() == 4)
+	assert(objc.tolua(t:valueForKey(objc.toobj'a')) == d.a)
+	assert(objc.tolua(t:valueForKey(objc.toobj'b')) == d.b)
+	assert(objc.tolua(t:valueForKey(objc.toobj'd'))[2] == 2)
+	print(ffi.string(t:description():UTF8String()))
+
+	print'ok'
+end
+
 function test.windows()
 	objc.load'Foundation'
 	objc.load'AppKit'
 
 	local pool = objc.NSAutoreleasePool:new()
 	local NSApp = objc.class('NSApp', 'NSApplication <NSApplicationDelegate>')
-
-	objc.debug.logtopics.add_class_method = true
 
 	--we need to add methods to the class before creating any objects!
 	--note: NSApplicationDelegate is an informal protocol.
@@ -438,29 +464,27 @@ function test.windows()
 	app:run()
 end
 
+function test.all(...)
+	for k,v in glue.sortedpairs(test) do
+		if k ~= 'all' and k ~= 'bridgesupport' then
+			print(k)
+			print(('='):rep(80))
+			test[k](...)
+		end
+	end
+end
+
 --cmdline interface
 
 local test_name = ...
-local test_args = {select(2, ...)}
-if test_name == 'objc_test' then test_name = nil end --loaded as module
-if test_name == nil then
-	test_name = default_test
-	test_args = default_test_args
-end
 
 if not test_name then
-	print('Usage: '..luajit..' '..arg[0]..' <test>|--all')
+	print('Usage: '..luajit..' '..arg[0]..' <test>')
 	print'Available tests:'
 	for k in glue.sortedpairs(test) do
 		print('', k)
 	end
-elseif test_name == '--all' then
-	for k in glue.sortedpairs(test) do
-		print(k)
-		print(('='):rep(80))
-		test[k](unpack(test_args))
-	end
 else
-	test[test_name](unpack(test_args))
+	test[test_name](select(2, ...))
 end
 

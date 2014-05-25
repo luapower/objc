@@ -112,6 +112,7 @@ setfenv(1, P)                                 --non-locals go in P
 
 local _ = string.format
 local id_ctype = ffi.typeof'id'
+local intptr_ctype = ffi.typeof'intptr_t'
 
 local function ptr(p) --convert NULL pointer to nil for easier handling (say 'not ptr' instead of 'ptr == nil')
 	if p == nil then return nil end
@@ -120,9 +121,9 @@ end
 
 local function nptr(p) --convert pointer to lua number for using as table key
 	if p == nil then return nil end
-	local np = ffi.cast('intptr_t', p)
+	local np = ffi.cast(intptr_ctype, p)
 	local n = tonumber(np)
-	assert(ffi.cast('intptr_t', n) == np) --check that we don't get pointers in the upper 13 bits on 64bit
+	assert(ffi.cast(intptr_ctype, n) == np) --check that we don't get pointers in the upper 13 bits on 64bit
 	return n
 end
 
@@ -422,9 +423,7 @@ end
 --convert a method type encoding to a C function type (as string)
 local function method_ctype_string(s, ...) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
 	local ret_ctype, arg_ctypes = method_arg_ctypes(s, ...)
-	local func_ctype = _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
-	log('method_ctype', '%-20s %s', s, func_ctype)
-	return func_ctype
+	return _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
 end
 
 local method_ctype = memoize(function(s) --caching to prevent ctype duplicates and avoid reparsing
@@ -898,10 +897,6 @@ ffi.metatype('struct objc_property', {
 
 --methods
 
-local function method_type(method)
-	return ffi.string(C.method_getTypeEncoding(method))
-end
-
 local function method_selector(method)
 	return ptr(C.method_getName(method))
 end
@@ -910,12 +905,16 @@ local function method_name(method)
 	return selector_name(method_selector(method))
 end
 
+local function method_object_type(method)
+	return ffi.string(C.method_getTypeEncoding(method))
+end
+
 local function method_object_ctype_string(method)
-	return method_ctype_string(method_type(method))
+	return method_ctype_string(method_object_type(method))
 end
 
 local function method_object_ctype(method)
-	return method_ctype(method_type(method))
+	return method_ctype(method_object_type(method))
 end
 
 local function method_implementation(method)
@@ -925,9 +924,9 @@ end
 ffi.metatype('struct objc_method', {
 	__tostring = method_name,
 	__index = {
-		type           = method_type,
 		selector       = method_selector,
 		name           = method_name,
+		type           = method_object_type,
 		ctype_string   = method_object_ctype_string,
 		ctype          = method_object_ctype,
 		implementation = method_implementation,
@@ -1094,7 +1093,7 @@ local function add_class_method(cls, sel, func, mtype)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	clear_cache(cls)
 	if logtopics.add_class_method then
-		log('add_class_method', '[%s %s]', class_name(cls), selector_name(sel))
+		log('add_class_method', '%-40s %-40s %s', selector_name(sel), mtype, callback_method_ctype_string(mtype))
 	end
 end
 
@@ -1141,12 +1140,14 @@ local function ivar_ctype(cls, name, ivar)
 	return ctype
 end
 
+local byteptr_ctype = 'uint8_t*'
+
 local function ivar_get_value(obj, name, ivar)
-	return ffi.cast(ivar_ctype(obj.isa, name, ivar), obj + ivar_offset(ivar))[0]
+	return ffi.cast(ivar_ctype(obj.isa, name, ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
 end
 
 local function ivar_set_value(obj, name, ivar, val)
-	ffi.cast(ivar_ctype(obj.isa, name, ivar), obj + ivar_offset(ivar))[0] = val
+	ffi.cast(ivar_ctype(obj.isa, name, ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
 end
 
 ffi.metatype('struct objc_ivar', {
@@ -1238,9 +1239,12 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 	local imp = method_implementation(method)
 	local can_retain = not noretain[selname]
 	local is_release = selname == 'release' or selname == 'autorelease'
-	local is_retain  = selname == 'retain'
 
 	return function(obj, ...) --note: obj is the class for a class method
+		if logtopics.method_call then
+			log('method_call', '%-40s %-40s %s', selector_name(sel),
+					method_object_type(method), method_object_ctype_string(method))
+		end
 		local ok, ret = pcall(imp, ffi.cast(id_ctype, obj), sel, ...)
 		if not ok then
 			check(false, '[%s %s] %s\n%s', tostring(cls), tostring(sel), ret, debug.traceback())
@@ -1291,7 +1295,7 @@ local function override(cls, selname, inst, func, mtype) --returns true if a met
 	local targetcls = inst and cls or metaclass(cls)
 	local sel, method = find_method(targetcls, selname)
 	if sel then
-		add_class_method(targetcls, sel, func, mtype or method_type(method))
+		add_class_method(targetcls, sel, func, mtype or method_object_type(method))
 		return true
 	end
 	--look to override/create a conforming method
@@ -1501,54 +1505,62 @@ local function block(func, mtype)
 	block.reserved = 0
 	block.invoke = ffi.cast('void*', callback)
 	block.descriptor = block_descriptor
-	return ffi.cast('id', block), callback
+	return ffi.cast(id_ctype, block), callback
 end
 
---lua type wrappers ------------------------------------------------------------------------------------------------------
+--lua type conversions ---------------------------------------------------------------------------------------------------
 
-local Obj --fw. decl.
-
-local function NSStr(s)
-    return objc.NSString:stringWithUTF8String(s)
-end
-
-local function NSNum(n)
-    return objc.NSNumber:numberWithDouble(n)
-end
-
-local function NSArr(t)
-    local ret = objc.NSMutableArray:array()
-    for i,v in ipairs(t) do
-        ret:addObject(Obj(v))
-    end
-    return ret
-end
-
-local function NSDic(t)
-    local ret = objc.NSMutableDictionary:dictionary()
-    for k,v in pairs(t) do
-        ret:setObject_forKey(Obj(v), Obj(k))
-    end
-    return ret
-end
-
-local function Obj(v) -- converts a lua value to an objc object representing that value
+function toobj(v) --convert a lua value to an objc object representing that value
 	if type(v) == 'number' then
-		return NSNum(v)
+		return objc.NSNumber:numberWithDouble(v)
 	elseif type(v) == 'string' then
-	  return NSStr(v)
+	  return objc.NSString:stringWithUTF8String(v)
 	elseif type(v) == 'table' then
 		if #v == 0 then
-			return NSDic(v)
+			 local dic = objc.NSMutableDictionary:dictionary()
+			 for k,v in pairs(v) do
+				  dic:setObject_forKey(toobj(v), toobj(k))
+			 end
+			 return dic
 		else
-			return NSArr(v)
+			 local arr = objc.NSMutableArray:array()
+			 for i,v in ipairs(v) do
+				  arr:addObject(toobj(v))
+			 end
+			 return arr
 		end
 	elseif type(v) == 'function' then
-		return block(v)
-	elseif type(v) == 'cdata' then
-		return ffi.cast(id_ctype, v)
+		return (block(v))
+	else
+		return v --pass through
 	end
-	return nil
+end
+
+local function tolua(obj) --convert an objc object that converts naturally to a lua value
+	local classname = class_name(obj.isa)
+	if issubclass(obj.isa, objc.NSNumber) then
+		return obj:doubleValue()
+	elseif issubclass(obj.isa, objc.NSString) then
+		return ffi.string(obj:UTF8String())
+	elseif issubclass(obj.isa, objc.NSDictionary) then
+		local t = {}
+		local count = obj:count()
+		local vals = ffi.new('id[?]', count)
+		local keys = ffi.new('id[?]', count)
+		obj:getObjects_andKeys(vals, keys)
+		for i = 0, count-1 do
+			t[tolua(keys[i])] = tolua(vals[i])
+		end
+		return t
+	elseif issubclass(obj.isa, objc.NSArray) then
+		local t = {}
+		for i = 0, obj:count()-1 do
+			t[#t+1] = tolua(obj:objectAtIndex(i))
+		end
+		return t
+	else
+		return obj --pass through
+	end
 end
 
 --publish everything -----------------------------------------------------------------------------------------------------
@@ -1590,13 +1602,9 @@ objc.override = override
 objc.addmethod = add_class_method
 objc.invalidate = invalidate_class
 
-objc.Obj = Obj
-objc.NSStr = NSStr
-objc.NSNum = NSNum
-objc.NSArr = NSArr
-objc.NSDic = NSDic
-
 objc.block = block
+objc.toobj = toobj
+objc.tolua = tolua
 
 setmetatable(objc, {
 	__index = function(t, k)
