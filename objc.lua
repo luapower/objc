@@ -389,15 +389,20 @@ function type_ctype(s, name, ...)
 end
 
 --decode a method type encoding returning the C type for the ret. val and a list of C types for the arguments
-local function method_arg_ctypes(s) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
+local function method_arg_ctypes(s, forcallback) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
 	local ret_ctype
 	local arg_ctypes = {}
+	local stop
 	local function addarg(s)
-		local ctype = type_ctype(s)
+		if stop then return '' end
+		--ffi callbacks don't work with pass-by-value structs, so we're going to stop at the first one.
+		local struct_byval = forcallback and s:find'^r?[{%(]'
 		if not ret_ctype then
-			ret_ctype = ctype
+			ret_ctype = struct_byval and 'void' or type_ctype(s)
+		elseif not struct_byval then
+			table.insert(arg_ctypes, type_ctype(s))
 		else
-			table.insert(arg_ctypes, ctype)
+			stop = true
 		end
 		return '' --remove the match
 	end
@@ -415,8 +420,8 @@ local function method_arg_ctypes(s) --eg. 'v12@0:4c8' (retval offset arg1 offset
 end
 
 --convert a method type encoding to a C function type (as string)
-local function method_ctype_string(s) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
-	local ret_ctype, arg_ctypes = method_arg_ctypes(s)
+local function method_ctype_string(s, ...) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
+	local ret_ctype, arg_ctypes = method_arg_ctypes(s, ...)
 	local func_ctype = _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
 	log('method_ctype', '%-20s %s', s, func_ctype)
 	return func_ctype
@@ -424,6 +429,14 @@ end
 
 local method_ctype = memoize(function(s) --caching to prevent ctype duplicates and avoid reparsing
 	return ffi.typeof(method_ctype_string(s))
+end)
+
+local function callback_method_ctype_string(s) --callback types are more limited
+	return method_ctype_string(s, true)
+end
+
+local callback_method_ctype = memoize(function(s)
+	return ffi.typeof(callback_method_ctype_string(s))
 end)
 
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
@@ -1075,7 +1088,7 @@ local clear_cache --fw. decl.
 
 local function add_class_method(cls, sel, func, mtype)
 	sel = selector(sel)
-	local ctype = method_ctype(mtype)
+	local ctype = callback_method_ctype(mtype)
 	local callback = ffi.cast(ctype, func) --note: these callback objects can't be released
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
@@ -1481,7 +1494,7 @@ local function block(func, mtype)
 	local function wrapper(block, ...)
 		return func(...)
 	end
-	local callback = ffi.cast(method_ctype(mtype), wrapper)
+	local callback = ffi.cast(callback_method_ctype(mtype), wrapper)
 	local block = block_ctype()
 	block.isa = C._NSConcreteGlobalBlock
 	block.flags = bit.lshift(1, 29)
@@ -1546,6 +1559,7 @@ objc.load = load_framework
 
 objc.type_ctype = type_ctype
 objc.method_ctype = method_ctype_string
+objc.callback_method_ctype = callback_method_ctype_string
 
 local function objc_protocols(cls)
 	if not cls then

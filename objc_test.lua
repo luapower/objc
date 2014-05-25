@@ -31,7 +31,11 @@ function test.parsing()
 	print(objc.type_ctype('[8[4c]]', 'arr')) --multi-dim. array
 	print(objc.type_ctype('[3^[8^c]]', 'arr'))
 	print(objc.type_ctype('{?="x"i"y"i""(?="ux"I"uy"I)}', nil, 'cdef')) --nested unnamed anonymous structs
-	print(objc.method_ctype('@"Class"@:{_NSRect=ff{_NSSize=ff}}^{?}^?', true)) --unseparated method args
+	print(objc.method_ctype'@"Class"@:{_NSRect={_NSPoint=ff}{_NSSize=ff}}^{?}^?') --unseparated method args
+	print''
+	print(objc.callback_method_ctype'{_NSPoint=ff}iii') --struct return value not supported
+	print(objc.callback_method_ctype'iii{_NSPoint=ff}ii') --pass-by-value struct not supported, stop at first encounter
+	print(objc.callback_method_ctype'{_NSPoint=ff}ii{_NSPoint=ff}i') --combined case
 end
 
 function test.indent()
