@@ -32,9 +32,9 @@ function test.parsing()
 	print(objc.type_ctype('{?="x"i"y"i""(?="ux"I"uy"I)}', nil, 'cdef')) --nested unnamed anonymous structs
 	print(objc.method_ctype'@"Class"@:{_NSRect={_NSPoint=ff}{_NSSize=ff}}^{?}^?') --unseparated method args
 	print''
-	print(objc.callback_method_ctype'{_NSPoint=ff}iii') --struct return value not supported
-	print(objc.callback_method_ctype'iii{_NSPoint=ff}ii') --pass-by-value struct not supported, stop at first encounter
-	print(objc.callback_method_ctype'{_NSPoint=ff}ii{_NSPoint=ff}i') --combined case
+	print(objc.method_ctype('{_NSPoint=ff}iii', true)) --struct return value not supported
+	print(objc.method_ctype('iii{_NSPoint=ff}ii', true)) --pass-by-value struct not supported, stop at first encounter
+	print(objc.method_ctype('{_NSPoint=ff}ii{_NSPoint=ff}i', true)) --combined case
 end
 
 function test.indent()
@@ -261,26 +261,39 @@ end
 function test.override()
 	objc.load'Foundation'
 
-	local classname = genname'MyClass'
-	local cls = objc.class(classname, 'NSObject')
+	local cls = objc.class(genname'MyClass', 'NSObject')
+	local metacls = objc.metaclass(cls)
 	local obj = cls:new()
 	local instdesc = 'hello-instance'
 	local classdesc = 'hello-class'
 
-	function cls:description() --override the instance method
-		return objc.NSString:alloc():initWithUTF8String(instdesc)
-	end
-	assert(ffi.string(cls:description():UTF8String()) == classname) --class method was not overriden
-	assert(ffi.string(obj:description():UTF8String()) == instdesc) --instance method was overriden
-
-	--objc.debug.invalidate_class(cls)
-
-	local metacls = objc.metaclass(cls)
 	function metacls:description() --override the class method
 		return objc.NSString:alloc():initWithUTF8String(classdesc)
 	end
-	assert(ffi.string(cls:description():UTF8String()) == classdesc) --class method was overriden
-	assert(ffi.string(obj:description():UTF8String()) == instdesc) --instance method was not overriden again
+
+	function cls:description() --override the instance method
+		return objc.NSString:alloc():initWithUTF8String(instdesc)
+	end
+
+	assert(cls:description():UTF8String() == classdesc) --class method was overriden
+	assert(obj:description():UTF8String() == instdesc) --instance method was overriden and it's different
+
+	--subclass and test again
+
+	local cls2 = objc.class(genname'MyClass', cls)
+	local metacls2 = objc.metaclass(cls2)
+	local obj2 = cls2:new()
+
+	function metacls2:description(callsuper) --override the class method
+		return objc.NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+	end
+
+	function cls2:description(callsuper) --override the instance method
+		return objc.NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+	end
+
+	assert(cls2:description():UTF8String() == classdesc..'2') --class method was overriden
+	assert(obj2:description():UTF8String() == instdesc..'2') --instance method was overriden and it's different
 
 	print'ok'
 end
@@ -344,7 +357,7 @@ function test.blocks()
 	local s = objc.NSString:alloc():initWithUTF8String('line1\nline2\nline3')
 	local t = {}
 	local block, callback = objc.block(function(line, pstop)
-		t[#t+1] = ffi.string(line:UTF8String())
+		t[#t+1] = line:UTF8String()
 		if #t == 2 then --stop at line 2
 			pstop[0] = 1
 		end
@@ -363,14 +376,14 @@ function test.methods()
 
 	local function print_methods(cls, name)
 		for meth in objc.methods(cls) do
-			print(string.format('%-50s %-50s %s', meth:name(), meth:type(), meth:ctype_string()))
+			print(string.format('%-50s %-50s %s', meth:name(), meth:type(), meth:ctype()))
 		end
 	end
 
 	print_methods(objc.NSString)
 
-	local m = objc.method(objc.NSString, objc.SEL'initWithUTF8String:')
-	print(m:type(), m:ctype_string())
+	local m = objc.method('NSString', 'initWithUTF8String:')
+	print(m:type(), m:ctype())
 
 	print'ok'
 end
@@ -388,11 +401,11 @@ function test.tolua()
 	objc.load'Foundation'
 
 	local n = objc.toobj(123.5)
-	assert(objc.issubclass(n.isa, objc.NSNumber))
+	assert(objc.isa(n, 'NSNumber'))
 	assert(objc.tolua(n) == 123.5)
 
 	local s = objc.toobj'hello'
-	assert(objc.issubclass(s.isa, objc.NSString))
+	assert(objc.isa(s, 'NSString'))
 	assert(objc.tolua(s) == 'hello')
 
 	local a = {1,2,6,7}
@@ -411,7 +424,7 @@ function test.tolua()
 	assert(objc.tolua(t:valueForKey(objc.toobj'a')) == d.a)
 	assert(objc.tolua(t:valueForKey(objc.toobj'b')) == d.b)
 	assert(objc.tolua(t:valueForKey(objc.toobj'd'))[2] == 2)
-	print(ffi.string(t:description():UTF8String()))
+	print(t:description():UTF8String())
 
 	print'ok'
 end
@@ -424,7 +437,7 @@ function test.windows()
 	local NSApp = objc.class('NSApp', 'NSApplication <NSApplicationDelegate>')
 
 	--we need to add methods to the class before creating any objects!
-	--note: NSApplicationDelegate is an informal protocol.
+	--note: NSApplicationDelegate is an informal protocol brought from bridgesupport.
 
 	function NSApp:applicationShouldTerminateAfterLastWindowClosed()
 		print'last window closed...'
@@ -443,7 +456,7 @@ function test.windows()
 	local NSWin = objc.class('NSWin', 'NSWindow <NSWindowDelegate>')
 
 	--we need to add methods to the class before creating any objects!
-	--note: NSWindowDelegate is a formal protocol.
+	--note: NSWindowDelegate is a formal protocol brought from the runtime.
 
 	function NSWin:windowWillClose()
 		print'window will close...'

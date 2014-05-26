@@ -57,6 +57,7 @@ const char *class_getName(Class cls);
 Class class_getSuperclass(Class cls);
 Class objc_allocateClassPair(Class superclass, const char *name, size_t extraBytes);
 void objc_registerClassPair(Class cls);
+BOOL class_isMetaClass(Class cls);
 
 //methods
 Method class_getInstanceMethod(Class aClass, SEL aSelector);
@@ -113,6 +114,7 @@ setfenv(1, P)                                 --non-locals go in P
 local _ = string.format
 local id_ctype = ffi.typeof'id'
 local intptr_ctype = ffi.typeof'intptr_t'
+local class_ctype = ffi.typeof'Class'
 
 local function ptr(p) --convert NULL pointer to nil for easier handling (say 'not ptr' instead of 'ptr == nil')
 	if p == nil then return nil end
@@ -389,15 +391,18 @@ function type_ctype(s, name, ...)
 	return decoder(s, name, ...)
 end
 
---decode a method type encoding returning the C type for the ret. val and a list of C types for the arguments
-local function method_arg_ctypes(s, forcallback) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
+--decode a method type encoding returning (as strings):
+--  the C type for the function
+--  the C type for the return value
+--  a list of C types for the arguments
+local function method_ctype(s, for_callback) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
 	local ret_ctype
 	local arg_ctypes = {}
 	local stop
 	local function addarg(s)
 		if stop then return '' end
 		--ffi callbacks don't work with pass-by-value structs, so we're going to stop at the first one.
-		local struct_byval = forcallback and s:find'^r?[{%(]'
+		local struct_byval = for_callback and s:find'^[rnNoORV]?[{%(]'
 		if not ret_ctype then
 			ret_ctype = struct_byval and 'void' or type_ctype(s)
 		elseif not struct_byval then
@@ -417,26 +422,9 @@ local function method_arg_ctypes(s, forcallback) --eg. 'v12@0:4c8' (retval offse
 		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?[%^]*[cislqCISLQfdBv%?@#%:%*])%d*', addarg) end --try <primitive>offset
 		assert(n > 0, s)
 	end
-	return ret_ctype, arg_ctypes
+	local ctype_string = _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
+	return ctype_string, ret_ctype, arg_ctypes
 end
-
---convert a method type encoding to a C function type (as string)
-local function method_ctype_string(s, ...) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
-	local ret_ctype, arg_ctypes = method_arg_ctypes(s, ...)
-	return _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
-end
-
-local method_ctype = memoize(function(s) --caching to prevent ctype duplicates and avoid reparsing
-	return ffi.typeof(method_ctype_string(s))
-end)
-
-local function callback_method_ctype_string(s) --callback types are more limited
-	return method_ctype_string(s, true)
-end
-
-local callback_method_ctype = memoize(function(s)
-	return ffi.typeof(callback_method_ctype_string(s))
-end)
 
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
 
@@ -585,12 +573,12 @@ function tag.function_alias(attrs) --these tags always come after the 'function'
 	end
 end
 
-local new_informal_protocol --fw. decl.
+local add_informal_protocol --fw. decl.
 
 local proto --informal_protocol object for the current 'informal_protocol' tag
 
 function tag.informal_protocol(attrs)
-	proto = new_informal_protocol(attrs.name, attrs.class_method ~= 'true')
+	proto = add_informal_protocol(attrs.name, attrs.class_method ~= 'true')
 end
 
 function tag.method(attrs)
@@ -776,7 +764,7 @@ local function informal_protocol(name)
 	return _informal_protocols[name]
 end
 
-function new_informal_protocol(name, inst)
+function add_informal_protocol(name, inst)
 	if formal_protocol(name) then return end --prevent needless duplication of formal protocols
 	local proto = setmetatable({_name = name, _inst = inst, _methods = {}}, infprot_meta)
 	_informal_protocols[name] = proto
@@ -909,27 +897,22 @@ local function method_object_type(method)
 	return ffi.string(C.method_getTypeEncoding(method))
 end
 
-local function method_object_ctype_string(method)
-	return method_ctype_string(method_object_type(method))
-end
-
 local function method_object_ctype(method)
 	return method_ctype(method_object_type(method))
 end
 
 local function method_implementation(method)
-	return ffi.cast(method_object_ctype(method), C.method_getImplementation(method))
+	return ptr(C.method_getImplementation(method))
 end
 
 ffi.metatype('struct objc_method', {
 	__tostring = method_name,
 	__index = {
-		selector       = method_selector,
-		name           = method_name,
-		type           = method_object_type,
-		ctype_string   = method_object_ctype_string,
-		ctype          = method_object_ctype,
-		implementation = method_implementation,
+		selector        = method_selector,
+		name            = method_name,
+		type            = method_object_type,
+		ctype           = method_object_ctype,
+		implementation  = method_implementation,
 	},
 })
 
@@ -939,15 +922,33 @@ local function classes() --list all loaded classes
 	return citer(own(C.objc_copyClassList(nil)))
 end
 
-local class_add_protocols --fw. decl.
+local add_class_protocol --fw. decl.
+
+local function isobj(x)
+	return ffi.istype(id_ctype, x)
+end
+
+local function isclass(x)
+	return ffi.istype(class_ctype, x)
+end
+
+local function ismetaclass(cls)
+	return C.class_isMetaClass(cls) == 1
+end
 
 local function class(name, super, proto, ...) --find or create a class
 
 	if super == nil then --want to find a class, not to create one
-		if type(name) ~= 'string' then return name end
+		if isclass(name) then --class object: pass through
+			return name
+		end
+		if isobj(name) then --instance: return its class
+			return name.isa
+		end
+		assert(type(name) == 'string', 'object, class, or class name expected, got %s', type(name))
 		return ptr(C.objc_getClass(name))
 	else
-		assert(type(name) == 'string', 'class name expected')
+		assert(type(name) == 'string', 'class name expected, got %s', type(name))
 	end
 
 	--given a second arg., check for 'SuperClass <Prtocol1, Protocol2,...>' syntax
@@ -978,32 +979,40 @@ local function class(name, super, proto, ...) --find or create a class
    C.objc_registerClassPair(cls)
 
 	if proto then
-		class_add_protocols(cls, proto, ...)
+		add_class_protocol(cls, proto, ...)
 	end
 
 	return cls
 end
 
 local function class_name(cls)
-	return ffi.string(C.class_getName(cls))
+	if isobj(cls) then cls = cls.isa end
+	return ffi.string(C.class_getName(class(cls)))
 end
 
-local function superclass(cls)
-	return ptr(C.class_getSuperclass(cls))
+local function superclass(cls) --note: superclass(metaclass(cls)) == metaclass(superclass(cls))
+	if isobj(cls) then cls = cls.isa end
+	return ptr(C.class_getSuperclass(class(cls)))
 end
 
-local function metaclass(cls)
+local function metaclass(cls) --note: metaclass(metaclass(cls)) == nil
+	if isobj(cls) then cls = cls.isa end
+	if ismetaclass(cls) then return nil end --OSX sets metaclass.isa to garbage
 	return ptr(cls.isa)
 end
 
-local function issubclass(cls, ofcls)
+local function isa(cls, what)
+	what = class(what)
+	if isobj(cls) then
+		return cls.isa == what or isa(cls.isa, what)
+	end
 	local super = superclass(cls)
-	if super == ofcls then
+	if super == what then
 		return true
 	elseif not super then
 		return false
 	end
-	return issubclass(super, ofcls)
+	return isa(super, what)
 end
 
 --class protocols
@@ -1024,14 +1033,17 @@ local function class_protocols(cls) --does not include protocols of superclasses
 end
 
 local function class_conforms(cls, proto)
-	if C.class_conformsToProtocol(cls, protocol(proto)) == 1 then
+	cls = class(cls)
+	proto = protocol(proto)
+	if C.class_conformsToProtocol(cls, proto) == 1 then
 		return true
 	end
 	local t = class_informal_protocols[nptr(cls)]
-	return t and t[protocol(proto):name()] and true or false
+	return t and t[proto:name()] and true or false
 end
 
-function class_add_protocols(cls, proto, ...)
+function add_class_protocol(cls, proto, ...)
+	cls = class(cls)
 	proto = protocol(proto)
 	if type(proto) == 'table' then
 		local t = class_informal_protocols[nptr(cls)]
@@ -1044,12 +1056,12 @@ function class_add_protocols(cls, proto, ...)
 		C.class_addProtocol(class(cls), proto)
 	end
 	if ... then
-		class_add_protocols(cls, ...)
+		add_class_protocol(cls, ...)
 	end
 end
 
 --find a selector in conforming protocols and if found, return its type
-function conforming_method_type(cls, sel, inst)
+local function conforming_method_type(cls, sel, inst)
 	for proto in class_protocols(cls) do
 		local mtype =
 			proto:method_type(sel, inst, false) or
@@ -1080,20 +1092,26 @@ local function class_methods(cls) --inherited methods not included
 end
 
 local function class_method(cls, sel) --looks for inherited methods too
-	return ptr(C.class_getInstanceMethod(cls, sel))
+	return ptr(C.class_getInstanceMethod(class(cls), selector(sel)))
 end
 
-local clear_cache --fw. decl.
+local callsuper --fw. decl.
 
 local function add_class_method(cls, sel, func, mtype)
 	sel = selector(sel)
-	local ctype = callback_method_ctype(mtype)
-	local callback = ffi.cast(ctype, func) --note: these callback objects can't be released
+	local selname = selector_name(sel)
+	local function callsuper_wrapper(obj, ...)
+		return callsuper(obj, selname, ...)
+	end
+	local function wrapper(obj, sel, ...) --wrapper that inserts callsuper as first arg.
+		return func(obj, callsuper_wrapper, ...)
+	end
+	local func_ctype = method_ctype(mtype, true)
+	local callback = ffi.cast(func_ctype, wrapper) --note: these callback objects can't be released
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
-	clear_cache(cls)
 	if logtopics.add_class_method then
-		log('add_class_method', '%-40s %-40s %s', selector_name(sel), mtype, callback_method_ctype_string(mtype))
+		log('add_class_method', '%-40s %-40s %s', selector_name(sel), mtype, func_ctype)
 	end
 end
 
@@ -1199,7 +1217,51 @@ local function find_conforming_method_type(cls, selname, inst)
 	end
 end
 
---class/instance method caller based on loose selector names
+--class/instance method call wrapper that deals only with conversion of arguments and return values.
+--these wrappers are the same for each method type hence they are memoized on method type alone.
+
+local method_call_wrapper = memoize(function(mtype)
+	local func_ctype, ret_ctype, arg_ctypes = method_ctype(mtype)
+	local func_ctype = ffi.typeof(func_ctype)
+
+	local function convert_ret(ret)
+		if ret == nil then
+			return nil --NULL -> nil
+		elseif ret_ctype == 'BOOL' then
+			return ret == 1 --BOOL -> boolean
+		elseif ret_ctype == 'char *' or ret_ctype == 'const char *' then
+			return ffi.string(ret)
+		else
+			return ret
+		end
+	end
+
+	local function convert_arg(i, arg)
+		local ctype = arg_ctypes[i]
+		if ctype == 'SEL' then
+			return selector(arg) --selector, string
+		elseif ctype == 'Class' then
+			return class(arg) --class, obj, classname
+		elseif ctype == 'id' then
+			return toobj(arg) --string, number, array-table, dict-table, function->block
+		else
+			return arg
+		end
+	end
+
+	local function convert_args(i, ...)
+		if select('#', ...) == 0 then return end
+		return convert_arg(i, ...), convert_args(i + 1, select(2, ...))
+	end
+
+	return function(imp, obj, sel, ...)
+		obj = ffi.cast(id_ctype, obj) --because obj is the Class object for a class method
+		imp = ffi.cast(func_ctype, imp)
+		return convert_ret(imp(obj, sel, convert_args(3, ...)))
+	end
+end)
+
+--class/instance method caller based on loose selector names.
 
 --NOTE: ffi.gc() applies to cdata objects, not to the identities that they hold. Thus you can easily get
 --the same object from two different method invocations into two distinct cdata objects. Setting ffi.gc()
@@ -1230,24 +1292,20 @@ end
 --methods for which we should refrain from retaining the result object
 noretain = {release=1, autorelease=1, retain=1, alloc=1, new=1, copy=1, mutableCopy=1}
 
-local caller_cache = {}
-
 local method_caller = memoize2(function(cls, selname) --method caller based on a loose selector
 	local sel, method = find_method(cls, selname)
 	if not sel then return end
 
 	local imp = method_implementation(method)
+	local wrapper = method_call_wrapper(method_object_type(method))
+
 	local can_retain = not noretain[selname]
 	local is_release = selname == 'release' or selname == 'autorelease'
 
-	return function(obj, ...) --note: obj is the class for a class method
-		if logtopics.method_call then
-			log('method_call', '%-40s %-40s %s', selector_name(sel),
-					method_object_type(method), method_object_ctype_string(method))
-		end
-		local ok, ret = pcall(imp, ffi.cast(id_ctype, obj), sel, ...)
+	return function(obj, ...)
+		local ok, ret = xpcall(wrapper, debug.traceback, imp, obj, sel, ...)
 		if not ok then
-			check(false, '[%s %s] %s\n%s', tostring(cls), tostring(sel), ret, debug.traceback())
+			check(false, '[%s %s] %s', tostring(cls), tostring(sel), ret)
 		end
 		if is_release then
 			ffi.gc(obj, nil) --disown this reference to obj
@@ -1256,38 +1314,20 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 				log('release', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
 			end
 		end
-		if ret == nil then
-			return nil --NULL -> nil
-		end
-		if can_retain and ffi.istype(id_ctype, ret) then
-			ret = ret:retain() --retain() will make ret a strong reference so we don't have to
-			if logtopics.retain then
-				log('retain', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
+		if ffi.istype(id_ctype, ret) then
+			if can_retain then
+				ret = ret:retain() --retain() will make ret a strong reference so we don't have to
+				if logtopics.retain then
+					log('retain', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
+				end
+			else
+				ffi.gc(ret, collect_object)
+				add_refcount(ret, 1)
 			end
-		elseif not is_release and ffi.istype(id_ctype, ret) then
-			ffi.gc(ret, collect_object)
-			add_refcount(ret, 1)
 		end
 		return ret
 	end
-end, caller_cache)
-
-function clear_cache(cls)
-	caller_cache[nptr(cls)] = nil
-	ivar_ctypes[nptr(cls)] = nil
-end
-
-function invalidate_class(cls) --required if overriding a method that was already called once
-	clear_cache(cls)
-	for acls in classes() do
-		if issubclass(acls, cls) then
-			clear_cache(acls)
-		end
-		if metaclass(acls) == cls then
-			clear_cache(acls)
-		end
-	end
-end
+end)
 
 --add, replace or override an existing/conforming instance/class method based on a loose selector name
 local function override(cls, selname, inst, func, mtype) --returns true if a method was found and created
@@ -1304,6 +1344,12 @@ local function override(cls, selname, inst, func, mtype) --returns true if a met
 		add_class_method(targetcls, sel, func, mtype or cmtype)
 		return true
 	end
+end
+
+function callsuper(obj, selname, ...)
+	local super = superclass(obj)
+	if not super then return end
+	return method_caller(super, selname)(obj, ...)
 end
 
 --class fields
@@ -1494,17 +1540,24 @@ local block_ctype = ffi.typeof'struct __block_literal_1'
 --create a block and return it typecast to 'id' (also returns the callback object for freeing)
 local function block(func, mtype)
 	mtype = mtype or 'v'
-	mtype = mtype:sub(1,1) .. '^v' .. mtype:sub(2)
+	local func_ctype, ret_ctype, arg_ctypes = method_ctype(mtype, true)
+
+	--adjust func_ctype: first arg. is the block object
+	table.insert(arg_ctypes, 1, 'void *')
+	local func_ctype =	_('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
+
 	local function wrapper(block, ...)
 		return func(...)
 	end
-	local callback = ffi.cast(callback_method_ctype(mtype), wrapper)
+	local callback = ffi.cast(func_ctype, wrapper)
+
 	local block = block_ctype()
 	block.isa = C._NSConcreteGlobalBlock
 	block.flags = bit.lshift(1, 29)
 	block.reserved = 0
 	block.invoke = ffi.cast('void*', callback)
 	block.descriptor = block_descriptor
+
 	return ffi.cast(id_ctype, block), callback
 end
 
@@ -1537,14 +1590,13 @@ function toobj(v) --convert a lua value to an objc object representing that valu
 end
 
 local function tolua(obj) --convert an objc object that converts naturally to a lua value
-	local classname = class_name(obj.isa)
-	if issubclass(obj.isa, objc.NSNumber) then
+	if isa(obj, 'NSNumber') then
 		return obj:doubleValue()
-	elseif issubclass(obj.isa, objc.NSString) then
-		return ffi.string(obj:UTF8String())
-	elseif issubclass(obj.isa, objc.NSDictionary) then
+	elseif isa(obj, 'NSString') then
+		return obj:UTF8String()
+	elseif isa(obj, 'NSDictionary') then
 		local t = {}
-		local count = obj:count()
+		local count = tonumber(obj:count())
 		local vals = ffi.new('id[?]', count)
 		local keys = ffi.new('id[?]', count)
 		obj:getObjects_andKeys(vals, keys)
@@ -1552,9 +1604,9 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 			t[tolua(keys[i])] = tolua(vals[i])
 		end
 		return t
-	elseif issubclass(obj.isa, objc.NSArray) then
+	elseif isa(obj, 'NSArray') then
 		local t = {}
-		for i = 0, obj:count()-1 do
+		for i = 0, tonumber(obj:count())-1 do
 			t[#t+1] = tolua(obj:objectAtIndex(i))
 		end
 		return t
@@ -1570,8 +1622,7 @@ objc.debug = P
 objc.load = load_framework
 
 objc.type_ctype = type_ctype
-objc.method_ctype = method_ctype_string
-objc.callback_method_ctype = callback_method_ctype_string
+objc.method_ctype = method_ctype
 
 local function objc_protocols(cls)
 	if not cls then
@@ -1585,11 +1636,14 @@ objc.SEL = selector
 objc.protocols = objc_protocols
 objc.protocol = protocol
 objc.classes = classes
+objc.isclass = isclass
+objc.isobj = isobj
+objc.ismetaclass = ismetaclass
 objc.class = class
 objc.classname = class_name
 objc.superclass = superclass
 objc.metaclass = metaclass
-objc.issubclass = issubclass
+objc.isa = isa
 objc.conforms = class_conforms
 objc.properties = class_properties
 objc.property = class_property
@@ -1597,10 +1651,15 @@ objc.methods = class_methods
 objc.method = class_method
 objc.ivars = class_ivars
 objc.ivar = instance_ivar
-objc.conform = class_add_protocols
+objc.conform = add_class_protocol
 objc.override = override
 objc.addmethod = add_class_method
-objc.invalidate = invalidate_class
+objc.caller = function(cls, selname)
+	return
+		method_caller(class(cls), tostring(selname)) or
+		method_caller(metaclass(cls), tostring(selname))
+end
+objc.callsuper = callsuper
 
 objc.block = block
 objc.toobj = toobj
