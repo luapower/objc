@@ -447,9 +447,8 @@ local xml    = {} --{expat_callback = handler}
 local tag    = {} --{tag = start_tag_handler}
 local endtag = {} --{tag = end_tag_handler}
 
-local _loaddeps
 function tag.depends_on(attrs)
-	if not _loaddeps then return end
+	if not loaddeps then return end
 	local ok, loaderr = pcall(load_framework, attrs.path)
 	if not ok then
 		err('load', '%s', loaderr)
@@ -600,12 +599,7 @@ function xml.end_tag(name)
 	if endtag[name] then endtag[name]() end
 end
 
-function load_bridgesupport(path, loaddeps_thistime)
-	if loaddeps_thistime ~= nil then
-		_loaddeps = loaddeps_thistime
-	else
-		_loaddeps = loaddeps
-	end
+function load_bridgesupport(path)
 	local expat = require'expat' --runtime dependency: not needed if bridgesupport is not used
 	expat.parse({path = path}, xml)
 end
@@ -667,7 +661,7 @@ function load_framework(namepath, option) --load a framework given its name or f
 		--load the bridgesupport xml file which contains typedefs and constants which we can't get from the runtime.
 		local path = _('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
 		if canread(path) then
-			load_bridgesupport(path, option == 'nodeps' and false)
+			load_bridgesupport(path)
 		end
 		loaded_bs[basepath] = true
 	end
