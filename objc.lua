@@ -4,6 +4,7 @@
 
 local ffi = require'ffi'
 local bit = require'bit'
+local _, expat = pcall(require, 'expat') --not needed if bridgesupport not used
 
 if ffi.arch ~= 'arm' and ffi.os == 'OSX' then
 	ffi.load('libobjc.A.dylib', true)
@@ -600,7 +601,6 @@ function xml.end_tag(name)
 end
 
 function load_bridgesupport(path)
-	local expat = require'expat' --runtime dependency: not needed if bridgesupport is not used
 	expat.parse({path = path}, xml)
 end
 
@@ -658,12 +658,12 @@ function load_framework(namepath, option) --load a framework given its name or f
 		loaded[basepath] = true
 	end
 	if loadtypes and option ~= 'notypes' and not loaded_bs[basepath] then
+		loaded_bs[basepath] = true --set it before loading the file to prevent recursion from depends_on tag
 		--load the bridgesupport xml file which contains typedefs and constants which we can't get from the runtime.
 		local path = _('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
 		if canread(path) then
 			load_bridgesupport(path)
 		end
-		loaded_bs[basepath] = true
 	end
 end
 
@@ -1634,6 +1634,7 @@ end
 objc.C = C
 objc.debug = P
 objc.load = load_framework
+objc.searchpaths = searchpaths
 
 objc.type_ctype = type_ctype
 objc.method_ctype = method_ctype

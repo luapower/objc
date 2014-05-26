@@ -14,8 +14,7 @@ Objecive-C runtime and BridgeSupport binding.
 __frameworks__
 
 `objc.load(name|path[, option])`										load a framework given its name or full path \
-																				option 'notypes': don't load bridgesupport file \
-																				option 'nodeps': don't load dependencies
+																				option 'notypes': don't load bridgesupport file
 
 `objc.searchpaths = {path1, ...}`									search paths for frameworks
 

@@ -18,7 +18,9 @@ objc.debug.loadtypes = true
 local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
 local luajit = ffi.os == 'Windows' and 'luajit' or './luajit' --luajit command for subprocess running
 
-objc.load'Foundation'
+if ffi.os == 'OSX' then
+	objc.load'Foundation'
+end
 
 --test helpers
 
