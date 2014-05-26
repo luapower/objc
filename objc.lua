@@ -82,11 +82,10 @@ const char *property_getName(objc_property_t property);
 const char *property_getAttributes(objc_property_t property);
 
 //ivars
-Ivar object_getInstanceVariable(id obj, const char *name, void **outValue);
+Ivar class_getInstanceVariable(Class cls, const char* name);
 const char *ivar_getName(Ivar ivar);
 const char *ivar_getTypeEncoding(Ivar ivar);
 ptrdiff_t ivar_getOffset(Ivar ivar);
-BOOL class_addIvar(Class cls, const char *name, size_t size, uint8_t alignment, const char *types);
 
 //inspection
 Class *objc_copyClassList(unsigned int *outCount);
@@ -244,6 +243,7 @@ local function declare(name, namespace, cdecl) --define a C type, const or funct
 		end
 		err('cdef', '%s\n\t%s', cdeferr, cdecl)
 	end
+	if not checkredef then error(name) end
 	cnames[namespace][name] = checkredef and cdecl or true --only store the cdecl if needed
 	return ok
 end
@@ -254,7 +254,7 @@ local function optname(name) --format an optional name: if not nil, return it wi
 	return name and ' '..name or ''
 end
 
-local type_ctype --fw. decl
+local type_ctype --fw. decl.
 
 local function array_ctype(s, name, ...) --('[Ntype]', 'name') -> ctype('type', 'name[N]')
 	local n,s = s:match'^%[(%d+)(.-)%]$'
@@ -352,7 +352,7 @@ function const_ctype(s, ...)
 end
 
 local ctype_decoders = {
-	['c'] = primitive_ctype'char',
+	['c'] = primitive_ctype'char', --BOOL is lost to this type in OSX
 	['i'] = primitive_ctype'int',
 	['s'] = primitive_ctype'short',
 	['l'] = primitive_ctype'long', --treated as a 32-bit quantity on 64-bit programs
@@ -366,8 +366,9 @@ local ctype_decoders = {
 
 	['f'] = primitive_ctype'float',
 	['d'] = primitive_ctype'double',
+	['D'] = primitive_ctype'long double',
 
-	['B'] = primitive_ctype'BOOL',
+	['B'] = primitive_ctype'BOOL', --not in OSX runtime (only in bridgesupport, so for global functions)
 	['v'] = primitive_ctype'void',
 	['?'] = primitive_ctype'void', --unknown type; used for function pointers among other things
 
@@ -399,10 +400,12 @@ local function method_ctype(s, for_callback) --eg. 'v12@0:4c8' (retval offset ar
 	local ret_ctype
 	local arg_ctypes = {}
 	local stop
-	local function addarg(s)
+	local function addarg(modifier, s)
+		modifier = modifier:find'r' and 'r' or '' --skip other modifiers
+		s = modifier .. s --put modifier back
 		if stop then return '' end
 		--ffi callbacks don't work with pass-by-value structs, so we're going to stop at the first one.
-		local struct_byval = for_callback and s:find'^[rnNoORV]?[{%(]'
+		local struct_byval = for_callback and s:find'^[{%(]'
 		if not ret_ctype then
 			ret_ctype = struct_byval and 'void' or type_ctype(s)
 		elseif not struct_byval then
@@ -414,13 +417,13 @@ local function method_ctype(s, for_callback) --eg. 'v12@0:4c8' (retval offset ar
 	end
 	local n
 	while s ~= '' do
-		               s,n = s:gsub('^[nNoORV]?(r?[%^]*%b{})%d*',     addarg)     --try {...}offset
-		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?[%^]*%b())%d*',     addarg) end --try (...)offset
-		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?[%^]*%b[])%d*',     addarg) end --try [...]offset
-		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?@)%?%d*',           addarg) end --try @? (block type)
-		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?@"[A-Z][^"]+")%d*', addarg) end --try @"Class"offset
-		if n == 0 then s,n = s:gsub('^[nNoORV]?(r?[%^]*[cislqCISLQfdBv%?@#%:%*])%d*', addarg) end --try <primitive>offset
-		assert(n > 0, s)
+		               s,n = s:gsub('^([rnNoORV]*)([%^]*%b{})%d*',     addarg)     --try {...}offset
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*%b())%d*',     addarg) end --try (...)offset
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*%b[])%d*',     addarg) end --try [...]offset
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)(@)%?%d*',           addarg) end --try @? (block type)
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)(@"[A-Z][^"]+")%d*', addarg) end --try @"Class"offset
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*[cislqCISLQfdDBv%?@#%:%*])%d*', addarg) end --try <primitive>offset
+		assert(n > 0, fields)
 	end
 	local ctype_string = _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
 	return ctype_string, ret_ctype, arg_ctypes
@@ -574,18 +577,19 @@ function tag.function_alias(attrs) --these tags always come after the 'function'
 end
 
 local add_informal_protocol --fw. decl.
+local add_informal_protocol_method --fw. decl.
 
 local proto --informal_protocol object for the current 'informal_protocol' tag
 
 function tag.informal_protocol(attrs)
-	proto = add_informal_protocol(attrs.name, attrs.class_method ~= 'true')
+	proto = add_informal_protocol(attrs.name)
 end
 
 function tag.method(attrs)
 	if not proto then return end
 	local s = attrs[typekey] or attrs.type
 	if not s then return end --type not available on this platform
-	proto._methods[attrs.selector] = s
+	add_informal_protocol_method(proto, attrs.selector, attrs.class_method ~= 'true', s)
 end
 
 function xml.start_tag(name, attrs)
@@ -728,7 +732,8 @@ local function formal_protocol_methods(proto, inst, required) --inherited method
 		i = i + 1
 		if desc == nil then return end
 		if desc[i].name == nil then return end
-		return desc[i].name, ffi.string(desc[i].types)
+		--note: we return the name of the selector instead of the selector itself to match the informal protocol API
+		return selector_name(desc[i].name), ffi.string(desc[i].types)
 	end
 end
 
@@ -741,6 +746,7 @@ end
 ffi.metatype('struct Protocol', {
 	__tostring = formal_protocol_name,
 	__index = {
+		formal      = true,
 		name        = formal_protocol_name,
 		protocols   = formal_protocol_protocols,
 		properties  = formal_protocol_properties,
@@ -753,7 +759,7 @@ ffi.metatype('struct Protocol', {
 --informal protocols (must have the exact same API as formal protocols)
 
 local _informal_protocols = {} --{name = proto}
-local infprot = {}
+local infprot = {formal = false}
 local infprot_meta = {__index = infprot}
 
 local function informal_protocols()
@@ -764,36 +770,53 @@ local function informal_protocol(name)
 	return _informal_protocols[name]
 end
 
-function add_informal_protocol(name, inst)
-	if formal_protocol(name) then return end --prevent needless duplication of formal protocols
-	local proto = setmetatable({_name = name, _inst = inst, _methods = {}}, infprot_meta)
+function add_informal_protocol(name)
+	if ffi.os == 'OSX' and formal_protocol(name) then return end --prevent needless duplication of formal protocols
+	local proto = setmetatable({_name = name, _methods = {}}, infprot_meta)
 	_informal_protocols[name] = proto
 	return proto
+end
+
+function add_informal_protocol_method(proto, selname, inst, type)
+	proto._methods[selname] = {_inst = inst, _type = type}
 end
 
 function infprot:name()
 	return self._name
 end
 
+infprot_meta.__tostring = infprot.name
+
 function noop() return end
+
 function infprot:protocols()
-	return noop
+	return noop --not specified
 end
 
 function infprot:properties()
-	return noop
+	return noop --not specified
 end
 
 infprot.property = noop
 
-function infprot:methods()
-	return pairs(self._methods)
+function infprot:methods(inst, required)
+	if required then return noop end --by definition, informal protocols do not contain required methods
+	local sel, m
+	return function()
+		while true do
+			sel, m = next(self._methods, sel)
+			if not sel then return end
+			if m._inst == inst then
+				return sel, m._type
+			end
+		end
+	end
 end
 
 function infprot:method_type(sel, inst, required)
 	if required then return end --by definition, informal protocols do not contain required methods
-	if self._inst ~= inst then return end
-	return self._methods[selector_name(sel)]
+	local m = self._methods[selector_name(sel)]
+	return m and m._inst == inst and m._type or nil
 end
 
 --all protocols
@@ -855,6 +878,10 @@ local function property_setter(prop)
 	return attrs.setter
 end
 
+local function property_type(prop)
+	return property_attrs(prop).type
+end
+
 local function property_ctype(prop)
 	local attrs = property_attrs(prop)
 	if not attrs.ctype then
@@ -877,6 +904,7 @@ ffi.metatype('struct objc_property', {
 		name     = property_name,
 		getter   = property_getter,
 		setter   = property_setter,
+		type     = property_type,
 		ctype    = property_ctype,
 		readonly = property_readonly,
 		ivar     = property_ivar,
@@ -945,10 +973,10 @@ local function class(name, super, proto, ...) --find or create a class
 		if isobj(name) then --instance: return its class
 			return name.isa
 		end
-		assert(type(name) == 'string', 'object, class, or class name expected, got %s', type(name))
+		check(type(name) == 'string', 'object, class, or class name expected, got %s', type(name))
 		return ptr(C.objc_getClass(name))
 	else
-		assert(type(name) == 'string', 'class name expected, got %s', type(name))
+		check(type(name) == 'string', 'class name expected, got %s', type(name))
 	end
 
 	--given a second arg., check for 'SuperClass <Prtocol1, Protocol2,...>' syntax
@@ -996,6 +1024,7 @@ local function superclass(cls) --note: superclass(metaclass(cls)) == metaclass(s
 end
 
 local function metaclass(cls) --note: metaclass(metaclass(cls)) == nil
+	cls = class(cls)
 	if isobj(cls) then cls = cls.isa end
 	if ismetaclass(cls) then return nil end --OSX sets metaclass.isa to garbage
 	return ptr(cls.isa)
@@ -1088,7 +1117,7 @@ end
 --class methods
 
 local function class_methods(cls) --inherited methods not included
-	return citer(own(C.class_copyMethodList(cls, nil)))
+	return citer(own(C.class_copyMethodList(class(cls), nil)))
 end
 
 local function class_method(cls, sel) --looks for inherited methods too
@@ -1098,6 +1127,7 @@ end
 local callsuper --fw. decl.
 
 local function add_class_method(cls, sel, func, mtype)
+	cls = class(cls)
 	sel = selector(sel)
 	local selname = selector_name(sel)
 	local function callsuper_wrapper(obj, ...)
@@ -1121,8 +1151,8 @@ local function class_ivars(cls)
 	return citer(own(C.class_copyIvarList(cls, nil)))
 end
 
-local function instance_ivar(obj, name)
-	return ptr(C.object_getInstanceVariable(obj, name, nil))
+local function class_ivar(cls, name)
+	return ptr(C.class_getInstanceVariable(cls, name))
 end
 
 local function ivar_name(ivar)
@@ -1138,34 +1168,22 @@ local function ivar_type(ivar)
 end
 
 local function ivar_ctype_string(ivar) --NOTE: bitfield ivars not supported (need ivar layouts for that)
-	local itype = ivar_type(ivar):match'^[rnNoORV]?(.*)'
+	local itype = ivar_type(ivar):match'^[rnNoORV]*(.*)'
 	return type_ctype('^'..itype, nil, itype:find'^[%{%(]%?' and 'cdef')
 end
 
-local ivar_ctypes = {} --{[nptr(cls)] = {ivar_name = ctype, ...}}
-
-local function ivar_ctype(cls, name, ivar)
-	local t = ivar_ctypes[nptr(cls)]
-	if not t then
-		t = {}
-		ivar_ctypes[nptr(cls)] = t
-	end
-	if t[name] then
-		return t[name]
-	end
-	local ctype = ffi.typeof(ivar_ctype_string(ivar))
-	t[name] = ctype
-	return ctype
-end
+local ivar_ctype = memoize2(function(cls, name)
+	return ffi.typeof(ivar_ctype_string(class_ivar(cls, name)))
+end)
 
 local byteptr_ctype = 'uint8_t*'
 
 local function ivar_get_value(obj, name, ivar)
-	return ffi.cast(ivar_ctype(obj.isa, name, ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
+	return ffi.cast(ivar_ctype(obj.isa, name), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
 end
 
 local function ivar_set_value(obj, name, ivar, val)
-	ffi.cast(ivar_ctype(obj.isa, name, ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
+	ffi.cast(ivar_ctype(obj.isa, name), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
 end
 
 ffi.metatype('struct objc_ivar', {
@@ -1173,8 +1191,8 @@ ffi.metatype('struct objc_ivar', {
 	__index = {
 		name = ivar_name,
 		type = ivar_type,
-		offset = ivar_offset,
 		ctype = ivar_ctype_string,
+		offset = ivar_offset,
 	},
 })
 
@@ -1219,6 +1237,8 @@ end
 
 --class/instance method call wrapper that deals only with conversion of arguments and return values.
 --these wrappers are the same for each method type hence they are memoized on method type alone.
+
+local toobj --fw. decl.
 
 local method_call_wrapper = memoize(function(mtype)
 	local func_ctype, ret_ctype, arg_ctypes = method_ctype(mtype)
@@ -1448,7 +1468,7 @@ local function get_instance_field(obj, field)
 		end
 	end
 	--look for an ivar
-	local ivar = instance_ivar(obj, field)
+	local ivar = class_ivar(obj.isa, field)
 	if ivar then
 		return ivar_get_value(obj, field, ivar)
 	end
@@ -1489,7 +1509,7 @@ local function set_instance_field(obj, field, val)
 		end
 	end
 	--look to set an ivar
-	local ivar = instance_ivar(obj, field)
+	local ivar = class_ivar(obj.isa, field)
 	if ivar then
 		ivar_set_value(obj, field, ivar, val)
 		return
@@ -1590,11 +1610,11 @@ function toobj(v) --convert a lua value to an objc object representing that valu
 end
 
 local function tolua(obj) --convert an objc object that converts naturally to a lua value
-	if isa(obj, 'NSNumber') then
+	if isa(obj, objc.NSNumber) then
 		return obj:doubleValue()
-	elseif isa(obj, 'NSString') then
+	elseif isa(obj, objc.NSString) then
 		return obj:UTF8String()
-	elseif isa(obj, 'NSDictionary') then
+	elseif isa(obj, objc.NSDictionary) then
 		local t = {}
 		local count = tonumber(obj:count())
 		local vals = ffi.new('id[?]', count)
@@ -1604,7 +1624,7 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 			t[tolua(keys[i])] = tolua(vals[i])
 		end
 		return t
-	elseif isa(obj, 'NSArray') then
+	elseif isa(obj, objc.NSArray) then
 		local t = {}
 		for i = 0, tonumber(obj:count())-1 do
 			t[#t+1] = tolua(obj:objectAtIndex(i))
@@ -1626,7 +1646,7 @@ objc.method_ctype = method_ctype
 
 local function objc_protocols(cls)
 	if not cls then
-		return protocls()
+		return protocols()
 	else
 		return class_protocols(cls)
 	end
@@ -1650,7 +1670,7 @@ objc.property = class_property
 objc.methods = class_methods
 objc.method = class_method
 objc.ivars = class_ivars
-objc.ivar = instance_ivar
+objc.ivar = class_ivar
 objc.conform = add_class_protocol
 objc.override = override
 objc.addmethod = add_class_method
@@ -1665,9 +1685,15 @@ objc.block = block
 objc.toobj = toobj
 objc.tolua = tolua
 
+local submodules = {inspect = 'objc_inspect'} --{name = submodule-where-name-is-defined}
+
+local function autoload(k)
+	return submodules[k] and require(submodules[k]) and objc[k]
+end
+
 setmetatable(objc, {
 	__index = function(t, k)
-		return class(k) or csymbol(k)
+		return class(k) or csymbol(k) or autoload(k)
 	end,
 })
 
@@ -1679,5 +1705,6 @@ if not ... then
 		print(_('%-10s %s', type(v), 'objc.debug.'..k))
 	end
 end
+
 
 return objc
