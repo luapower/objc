@@ -468,6 +468,10 @@ local function ftype_mtype(ftype) --convert ftype to type encoding
 	return (ftype.retval or 'v') .. table.concat(ftype)
 end
 
+local ffi_ctype = memoize(function(ctype) --cache function pointer types because we can only make 64k of them
+	return ffi.typeof(ctype)
+end)
+
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
 
 lazyfuncs = true --cdef functions on the first call rather than at the time of parsing the xml (see below)
@@ -589,7 +593,11 @@ local function add_function(name, ftype, lazy) --cdef and call-wrap a global C f
 
 	local function addfunc()
 		declare(name, 'global', ftype_ctype(ftype, name))
-		local cfunc = C[name]
+		local cfunc = csymbol(name)
+		if not cfunc then
+			err('symbol', 'missing C function: %s', name)
+			return
+		end
 		local caller = function_caller(ftype, cfunc)
 		rawset(objc, name, caller) --overshadow the C function with the caller
 		return caller
@@ -599,7 +607,9 @@ local function add_function(name, ftype, lazy) --cdef and call-wrap a global C f
 		--delay cdef'ing the function until the first call, to avoid polluting the C namespace with unused declarations.
 		--this is because in luajit2 can only hold as many as 64k ctypes total.
 		rawset(objc, name, function(...)
-			return addfunc()(...)
+			local func = addfunc()
+			if not func then return end
+			return func(...)
 		end)
 	else
 		addfunc()
@@ -660,7 +670,7 @@ end
 
 --method type annotations: {[is_instance] = {classname = {methodname = partial-ftype}}.
 --only boolean retvals and function pointer args are recorded.
-mta = {[true] = {}, [false] = {}}
+local mta = {[true] = {}, [false] = {}}
 
 function tag.class(attrs, getwhile)
 	local inst_methods = {}
@@ -712,7 +722,7 @@ function tag.class(attrs, getwhile)
 	end
 end
 
-local function method_annotations(classname, selname, inst, ftype)
+local function get_raw_mta(classname, selname, inst)
 	local cls = mta[inst][classname]
 	return cls and cls[selname]
 end
@@ -879,7 +889,7 @@ end
 
 --selectors
 
-local selector_object = memoize(function(name) --caching to prevent string creation on each method call (worth it?)
+local selector_object = memoize(function(name) --cache to prevent string creation on each method call (worth it?)
 	--replace '_' with ':' except at the beginning
 	name = name:match('^_*') .. name:gsub('^_*', ''):gsub('_', ':')
 	return ptr(C.sel_registerName(name))
@@ -1067,7 +1077,7 @@ local prop_attr_decoders = { --TODO: copy, retain, nonatomic, dynamic, weak, gc.
 	S = function(s, t) t.setter = s end,
 	R = function(s, t) t.readonly = true end,
 }
-local property_attrs = memoize(function(prop) --caching to prevent parsing on each property access
+local property_attrs = memoize(function(prop) --cache to prevent parsing on each property access
 	local s = ffi.string(C.property_getAttributes(prop))
 	local attrs = {}
 	for k,v in (s..','):gmatch'(.)([^,]*),' do
@@ -1381,7 +1391,7 @@ local function add_class_method(cls, sel, func, ftype)
 	end
 	func = callback_caller(ftype, func)         --wrapper that converts args and return values.
 	local ctype = ftype_ctype(ftype, nil, true) --special callback ctype stripped of pass-by-val structs.
-	local callback = ffi.cast(ctype, func)      --note: this callback object pins func; also, it will never be released.
+	local callback = ffi.cast(ffi_ctype(ctype), func) --note: pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	if logtopics.addmethod then
@@ -1489,21 +1499,27 @@ local function find_conforming_mtype(cls, selname)
 	end
 end
 
---ftype annotator
+--method ftype annotation
 
-local function annotate_method_ftype(cls, sel, ftype)
-	local mta = method_annotations(class_name(cls), selector_name(sel), not ismetaclass(cls))
-	if mta then --override ftype with the partial mta ftype
+local function get_mta(cls, sel) --looks in superclasses too
+	local mta = get_raw_mta(class_name(cls), selector_name(sel), not ismetaclass(cls))
+	if mta then return mta end
+	cls = superclass(cls)
+	if not cls then return end
+	return get_mta(cls, sel)
+end
+
+local function annotate_ftype(ftype, mta)
+	if mta then --the mta is a partial ftype: add it over
 		for k,v in pairs(mta) do
 			ftype[k] = v
 		end
-	else --look in superclass
-		cls = superclass(cls)
-		if cls then
-			return annotate_method_ftype(cls, sel, ftype)
-		end
 	end
 	return ftype
+end
+
+local function annotate_method_ftype(cls, sel, ftype)
+	return annotate_ftype(ftype, get_mta(cls, sel))
 end
 
 --class/instance method caller based on loose selector names.
@@ -1537,13 +1553,32 @@ end
 --methods for which we should refrain from retaining the result object
 noretain = {release=1, autorelease=1, retain=1, alloc=1, new=1, copy=1, mutableCopy=1}
 
-local method_caller = memoize2(function(cls, selname) --method caller based on a loose selector
+local fctype_cache_ = memoize(function(mtype)
+	local ftype = mtype_ftype(mtype)
+	local ctype = ftype_ctype(ftype)
+	local ctype = ffi_ctype(ctype)
+	return {ftype, ctype}
+end)
+local function fctype_cache(mtype)
+	return unpack(fctype_cache_(mtype))
+end
+
+--cache it to avoid re-parsing, annotating, formatting, casting, function-wrapping, method-wrapping.
+local method_caller = memoize2(function(cls, selname)
 	local sel, method = find_method(cls, selname)
 	if not sel then return end
 
-	local ftype = method_ftype(method)
-	local ftype = annotate_method_ftype(cls, sel, ftype)
-	local ctype = ftype_ctype(ftype)
+	local mtype = method_mtype(method)
+	local mta = get_mta(cls, sel)
+	local ftype, ctype
+	if not mta then --unnanotated types can save us type parsing, formatting and ftype creation
+		ftype, ctype = fctype_cache(mtype)
+	else
+		ftype = mtype_ftype(mtype)
+		ftype = annotate_ftype(ftype, mta)
+		ctype = ftype_ctype(ftype)
+		ctype = ffi_ctype(ctype)
+	end
 	local func = method_implementation(method)
 	local func = ffi.cast(ctype, func)
 	local func = function_caller(ftype, func)
@@ -1814,7 +1849,7 @@ local function block(func, ftype)
 	local function caller(block, ...) --wrapper to remove the first arg
 		return func(...)
 	end
-	local callback = ffi.cast(ctype, caller)
+	local callback = ffi.cast(ffi_ctype(ctype), caller)
 
 	local refcount = 1
 
@@ -1916,14 +1951,11 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 	end
 end
 
---function call wrapper that deals only with conversion of arguments and return values.
---these wrappers are the same for each method type hence they are memoized on method type alone.
-
 local function fp_callback(fp, arg)
 	return arg
 end
 
-function function_caller(ftype, func)
+function function_caller(ftype, func) --wrap a function for automatic type conversion of its args and return value.
 
 	local function convert_ret(ret)
 		if ret == nil then
@@ -1961,7 +1993,6 @@ function function_caller(ftype, func)
 		return convert_ret(func(convert_args(1, ...)))
 	end
 end
-
 
 function callback_caller(ftype, func)
 	--TODO: convert fp args to function ctype
