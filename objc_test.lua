@@ -6,13 +6,15 @@ local pp = require'pp'
 io.stdout:setvbuf'no'
 io.stderr:setvbuf'no'
 
+setmetatable(_G, {__index = objc})
+
 --test options
 
-local subprocess = true --run each bridgesupport test in a subprocess
-objc.debug.lazyfuncs = false
-objc.debug.checkredef = true
+local subprocess = false --run each bridgesupport test in a subprocess
+objc.debug.lazyfuncs = true
+objc.debug.checkredef = false
 objc.debug.printcdecl = false
-objc.debug.loaddeps = true
+objc.debug.loaddeps = false
 objc.debug.loadtypes = true
 
 local bsdir = '_bridgesupport' --path where *.bridgesupport files are on Windows (tree or flat doesn't matter)
@@ -20,6 +22,7 @@ local luajit = ffi.os == 'Windows' and 'luajit' or './luajit' --luajit command f
 
 if ffi.os == 'OSX' then
 	objc.load'Foundation'
+	pool = NSAutoreleasePool:new()
 end
 
 --test helpers
@@ -34,15 +37,12 @@ end
 
 local n = 0
 local function genname(prefix)
+	if not prefix then return genname'MyClass' end
 	n = n + 1
 	return prefix..n
 end
 
-local function classname()
-	return genname'MyClass'
-end
-
-local function errpcall(patt, ...) --pcall that should fail
+local function errpcall(patt, ...) --pcall that should fail with a specific message
 	local ok, err = pcall(...)
 	assert(not ok)
 	assert(err:find(patt))
@@ -50,30 +50,36 @@ end
 
 --test namespace
 
-local test = {}      --{name = test_func}
+local test = {}    --{name = test_func}
 local eyetest = {} --{name = test_func}
+local demo = {}
+local tests = {tests = test, ['eye tests'] = eyetest, demos = demo}
 
 function test.parsing()
-	assert(objc.type_ctype('[8^c]', 'arr') == 'char *arr[8]') --array of pointers
-	assert(objc.type_ctype('^[8c]', 'arr') == 'char (*arr)[8]') --pointer to array
-	assert(objc.type_ctype('[8[4c]]', 'arr') == 'char arr[8][4]') --multi-dim. array
-	assert(objc.type_ctype('[3^[8^c]]', 'arr') == 'char *(*arr[3])[8]')
-	assert(objc.type_ctype('{?="x"i"y"i""(?="ux"I"uy"I)}', nil, 'cdef') ==
+	assert(stype_ctype('[8^c]', 'arr') == 'char *arr[8]') --array of pointers
+	assert(stype_ctype('^[8c]', 'arr') == 'char (*arr)[8]') --pointer to array
+	assert(stype_ctype('[8[4c]]', 'arr') == 'char arr[8][4]') --multi-dim. array
+	assert(stype_ctype('[3^[8^c]]', 'arr') == 'char *(*arr[3])[8]')
+	assert(stype_ctype('{?="x"i"y"i""(?="ux"I"uy"I)}', nil, 'cdef') ==
 		'struct {\n\tint x;\n\tint y;\n\tunion {\n\t\tunsigned int ux;\n\t\tunsigned int uy;\n\t};\n}'
 		) --nested unnamed anonymous structs
-	assert(objc.method_ctype'@"Class"@:{_NSRect={_NSPoint=ff}{_NSSize=ff}}^{?}^?',
-		'id (*) (id, SEL, struct _NSRect, void *, void *)') --unseparated method args
-	assert(objc.method_ctype('{_NSPoint=ff}iii', true) ==
+
+	local function mtype_ctype(mtype, ...)
+		return ftype_ctype(mtype_ftype(mtype), ...)
+	end
+	assert(mtype_ctype('@"Class"@:{_NSRect={_NSPoint=ff}{_NSSize=ff}}^{?}^?', 'globalFunction') ==
+		'id globalFunction (id, SEL, struct _NSRect, void *, void *)') --unseparated method args
+	assert(mtype_ctype('{_NSPoint=ff}iii', nil, true) ==
 		'void (*) (int, int, int)') --struct return value not supported
-	assert(objc.method_ctype('iii{_NSPoint=ff}ii', true) ==
+	assert(mtype_ctype('iii{_NSPoint=ff}ii', nil, true) ==
 		'int (*) (int, int)') --pass-by-value struct not supported, stop at first encounter
-	assert(objc.method_ctype('{_NSPoint=ff}ii{_NSPoint=ff}i', true) ==
+	assert(mtype_ctype('{_NSPoint=ff}ii{_NSPoint=ff}i', nil, true) ==
 		'void (*) (int, int)') --combined case
 end
 
 function eyetest.indent()
 	--_NXEvent (test indent for nested unnamed anonymous structs)
-	print(objc.type_ctype('{?="type"i"location"{?="x"i"y"i}"time"Q"flags"i"window"I"service_id"Q"ext_pid"i"data"(?="mouse"{?="subx"C"suby"C"eventNum"s"click"i"pressure"C"buttonNumber"C"subType"C"reserved2"C"reserved3"i"tablet"(?="point"{_NXTabletPointData="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s}"proximity"{_NXTabletProximityData="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s})}"mouseMove"{?="dx"i"dy"i"subx"C"suby"C"subType"C"reserved1"C"reserved2"i"tablet"(?="point"{_NXTabletPointData="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s}"proximity"{_NXTabletProximityData="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s})}"key"{?="origCharSet"S"repeat"s"charSet"S"charCode"S"keyCode"S"origCharCode"S"reserved1"i"keyboardType"I"reserved2"i"reserved3"i"reserved4"i"reserved5"[4i]}"tracking"{?="reserved"s"eventNum"s"trackingNum"i"userData"i"reserved1"i"reserved2"i"reserved3"i"reserved4"i"reserved5"i"reserved6"[4i]}"scrollWheel"{?="deltaAxis1"s"deltaAxis2"s"deltaAxis3"s"reserved1"s"fixedDeltaAxis1"i"fixedDeltaAxis2"i"fixedDeltaAxis3"i"pointDeltaAxis1"i"pointDeltaAxis2"i"pointDeltaAxis3"i"reserved8"[4i]}"zoom"{?="deltaAxis1"s"deltaAxis2"s"deltaAxis3"s"reserved1"s"fixedDeltaAxis1"i"fixedDeltaAxis2"i"fixedDeltaAxis3"i"pointDeltaAxis1"i"pointDeltaAxis2"i"pointDeltaAxis3"i"reserved8"[4i]}"compound"{?="reserved"s"subType"s"misc"(?="F"[11f]"L"[11i]"S"[22s]"C"[44c])}"tablet"{?="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s"reserved"[4i]}"proximity"{?="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s"reserved2"[4i]})}', nil, 'cdef'))
+	print(stype_ctype('{?="type"i"location"{?="x"i"y"i}"time"Q"flags"i"window"I"service_id"Q"ext_pid"i"data"(?="mouse"{?="subx"C"suby"C"eventNum"s"click"i"pressure"C"buttonNumber"C"subType"C"reserved2"C"reserved3"i"tablet"(?="point"{_NXTabletPointData="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s}"proximity"{_NXTabletProximityData="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s})}"mouseMove"{?="dx"i"dy"i"subx"C"suby"C"subType"C"reserved1"C"reserved2"i"tablet"(?="point"{_NXTabletPointData="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s}"proximity"{_NXTabletProximityData="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s})}"key"{?="origCharSet"S"repeat"s"charSet"S"charCode"S"keyCode"S"origCharCode"S"reserved1"i"keyboardType"I"reserved2"i"reserved3"i"reserved4"i"reserved5"[4i]}"tracking"{?="reserved"s"eventNum"s"trackingNum"i"userData"i"reserved1"i"reserved2"i"reserved3"i"reserved4"i"reserved5"i"reserved6"[4i]}"scrollWheel"{?="deltaAxis1"s"deltaAxis2"s"deltaAxis3"s"reserved1"s"fixedDeltaAxis1"i"fixedDeltaAxis2"i"fixedDeltaAxis3"i"pointDeltaAxis1"i"pointDeltaAxis2"i"pointDeltaAxis3"i"reserved8"[4i]}"zoom"{?="deltaAxis1"s"deltaAxis2"s"deltaAxis3"s"reserved1"s"fixedDeltaAxis1"i"fixedDeltaAxis2"i"fixedDeltaAxis3"i"pointDeltaAxis1"i"pointDeltaAxis2"i"pointDeltaAxis3"i"reserved8"[4i]}"compound"{?="reserved"s"subType"s"misc"(?="F"[11f]"L"[11i]"S"[22s]"C"[44c])}"tablet"{?="x"i"y"i"z"i"buttons"S"pressure"S"tilt"{?="x"s"y"s}"rotation"S"tangentialPressure"s"deviceID"S"vendor1"s"vendor2"s"vendor3"s"reserved"[4i]}"proximity"{?="vendorID"S"tabletID"S"pointerID"S"deviceID"S"systemTabletID"S"vendorPointerType"S"pointerSerialNumber"I"uniqueID"Q"capabilityMask"I"pointerType"C"enterProximity"C"reserved1"s"reserved2"[4i]})}', nil, 'cdef'))
 end
 
 --test parsing of bridgesupport files.
@@ -139,7 +145,7 @@ function eyetest.bridgesupport(bsfile)
 
 			objc.debug.load_bridgesupport(path)
 			n = n + 1
-			print(n, '', name)
+			--print(n, '', name)
 		else
 			print('! not found', name, path)
 		end
@@ -147,66 +153,63 @@ function eyetest.bridgesupport(bsfile)
 
 	local function status()
 		pp('errors', objc.debug.errcount)
-		print('globals: '..objc.debug.cnames.global[1])
-		print('structs: '..objc.debug.cnames.struct[1])
+		print('globals:  '..objc.debug.cnames.global[1])
+		print('structs:  '..objc.debug.cnames.struct[1])
 	end
 
 	if bsfile then
 		objc.debug.load_framework(bsfile)
-		status()
 	else
 		for bsfile in bsfiles() do
 			if bsfile:match'Python' then
 				print('skipping '..bsfile) --python bridgesupport files are non-standard and deprecated
 			else
-				print(); print(bsfile); print(('='):rep(80))
+				--print(); print(bsfile); print(('='):rep(80))
 				if subprocess then
 					os.execute(luajit..' '..arg[0]..' bridgesupport '..bsfile)
 				else
 					objc.debug.load_framework(bsfile)
 				end
-				if not subprocess then
-					status()
-				end
 			end
 		end
+		status()
 	end
 
 	objc.debug.load_framework = objc_load --put it back
 end
 
 function test.selectors()
-	assert(tostring(objc.SEL'se_lec_tor') == 'se:lec:tor')
-	assert(tostring(objc.SEL'se_lec_tor_') == 'se:lec:tor:')
-	assert(tostring(objc.SEL'__se_lec_tor') == '__se:lec:tor')
-	assert(tostring(objc.SEL'__se:lec:tor:') == '__se:lec:tor:')
+	assert(tostring(SEL'se_lec_tor') == 'se:lec:tor')
+	assert(tostring(SEL'se_lec_tor_') == 'se:lec:tor:')
+	assert(tostring(SEL'__se_lec_tor') == '__se:lec:tor')
+	assert(tostring(SEL'__se:lec:tor:') == '__se:lec:tor:')
 end
 
 --class, superclass, metaclass, class protocols
 function test.class()
 	--arg. checking
-	errpcall('already',    objc.class, 'NSObject', 'NSString')
-	errpcall('superclass', objc.class, classname(), 'MyUnknownClass')
-	errpcall('protocol',   objc.class, classname(), 'NSObject <MyUnknownProtocol>')
+	errpcall('already',    class, 'NSObject', 'NSString')
+	errpcall('superclass', class, genname(), 'MyUnknownClass')
+	errpcall('protocol',   class, genname(), 'NSObject <MyUnknownProtocol>')
 
 	--class overloaded constructors
-	local cls = objc.class('MyClassX', false) --root class
-	assert(objc.classname(cls) == 'MyClassX')
-	assert(not objc.superclass(cls))
+	local cls = class('MyClassX', false) --root class
+	assert(classname(cls) == 'MyClassX')
+	assert(not superclass(cls))
 
 	--derived class
-	local cls = objc.class(classname(), 'NSArray')
-	assert(objc.isa(cls, 'NSArray'))
+	local cls = class(genname(), 'NSArray')
+	assert(isa(cls, 'NSArray'))
 
 	--derived + conforming
-	local cls = objc.class(classname(), 'NSArray <NSStreamDelegate, NSLocking>')
-	assert(objc.isa(cls, 'NSArray'))
+	local cls = class(genname(), 'NSArray <NSStreamDelegate, NSLocking>')
+	assert(isa(cls, 'NSArray'))
 
-	assert(objc.conforms(cls, 'NSStreamDelegate'))
-	assert(objc.conforms(cls, 'NSLocking'))
+	assert(conforms(cls, 'NSStreamDelegate'))
+	assert(conforms(cls, 'NSLocking'))
 
 	local t = {0}
-	for proto in objc.protocols(cls) do
+	for proto in protocols(cls) do
 		t[proto:name()] = true
 		t[1] = t[1] + 1
 	end
@@ -215,25 +218,25 @@ function test.class()
 	assert(t.NSLocking)
 
 	--class hierarchy queries
-	assert(objc.superclass(cls) == objc.NSArray)
-	assert(objc.metaclass(cls))
-	assert(objc.superclass(objc.metaclass(cls)) == objc.metaclass'NSArray')
-	assert(objc.metaclass(objc.superclass(cls)) == objc.metaclass'NSArray')
-	assert(objc.metaclass(objc.metaclass(cls)) == nil)
-	assert(objc.isa(cls, 'NSObject'))
-	assert(objc.ismetaclass(objc.metaclass(cls)))
-	assert(objc.isclass(cls))
-	assert(not objc.ismetaclass(cls))
-	assert(not objc.isobj(cls))
-	assert(objc.isclass(objc.metaclass(cls)))
+	assert(superclass(cls) == NSArray)
+	assert(metaclass(cls))
+	assert(superclass(metaclass(cls)) == metaclass'NSArray')
+	assert(metaclass(superclass(cls)) == metaclass'NSArray')
+	assert(metaclass(metaclass(cls)) == nil)
+	assert(isa(cls, 'NSObject'))
+	assert(ismetaclass(metaclass(cls)))
+	assert(isclass(cls))
+	assert(not ismetaclass(cls))
+	assert(not isobj(cls))
+	assert(isclass(metaclass(cls)))
 
 	local obj = cls:new()
-	assert(objc.isobj(obj))
-	assert(not objc.isclass(obj))
+	assert(isobj(obj))
+	assert(not isclass(obj))
 end
 
 function test.refcount()
-	local cls = objc.class(classname(), 'NSObject')
+	local cls = class(genname(), 'NSObject')
 	local inst, inst2, inst3
 
 	inst = cls:new()
@@ -264,7 +267,7 @@ function test.refcount()
 end
 
 function test.luavars()
-	local cls = objc.class(classname(), 'NSObject')
+	local cls = class(genname(), 'NSObject')
 
 	--class vars
 	cls.myclassvar = 'doh1'
@@ -297,18 +300,20 @@ function test.luavars()
 end
 
 function test.override()
-	local cls = objc.class(classname(), 'NSObject')
-	local metacls = objc.metaclass(cls)
+	objc.debug.logtopics.addmethod = true
+
+	local cls = class(genname(), 'NSObject')
+	local metacls = metaclass(cls)
 	local obj = cls:new()
 	local instdesc = 'hello-instance'
 	local classdesc = 'hello-class'
 
 	function metacls:description() --override the class method
-		return objc.NSString:alloc():initWithUTF8String(classdesc)
+		return NSString:alloc():initWithUTF8String(classdesc)
 	end
 
 	function cls:description() --override the instance method
-		return objc.NSString:alloc():initWithUTF8String(instdesc)
+		return NSString:alloc():initWithUTF8String(instdesc)
 	end
 
 	assert(cls:description():UTF8String() == classdesc) --class method was overriden
@@ -316,16 +321,16 @@ function test.override()
 
 	--subclass and test again
 
-	local cls2 = objc.class(classname(), cls)
-	local metacls2 = objc.metaclass(cls2)
+	local cls2 = class(genname(), cls)
+	local metacls2 = metaclass(cls2)
 	local obj2 = cls2:new()
 
 	function metacls2:description(callsuper) --override the class method
-		return objc.NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+		return NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
 	end
 
 	function cls2:description(callsuper) --override the instance method
-		return objc.NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+		return NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
 	end
 
 	assert(cls2:description():UTF8String() == classdesc..'2') --class method was overriden
@@ -333,7 +338,7 @@ function test.override()
 end
 
 function test.ivars()
-	local obj = objc.NSDocInfo:new()
+	local obj = NSDocInfo:new()
 
 	if ffi.abi'64bit' then
 		assert(ffi.typeof(obj.time) == ffi.typeof'long long')
@@ -352,91 +357,91 @@ function test.ivars()
 end
 
 function test.properties()
-	local pr = objc.NSProgress:progressWithTotalUnitCount(123)
+	local pr = NSProgress:progressWithTotalUnitCount(123)
 	assert(pr.totalUnitCount == 123) --as initialized
 	pr.totalUnitCount = 321 --read/write property
 	assert(pr.totalUnitCount == 321)
-	assert(not pcall(function() pr.indeterminate = 1 end)) --attempt to set read/only property
-	assert(pr.indeterminate == 0)
+	assert(not pcall(function() pr.indeterminate = true end)) --attempt to set read-only property
+	assert(pr.indeterminate == false)
 end
 
 function test.blocks()
-	local s = objc.NSString:alloc():initWithUTF8String('line1\nline2\nline3')
+	objc.debug.logtopics.block = true
+
+	local s = NSString:alloc():initWithUTF8String('line1\nline2\nline3')
 	local t = {}
-	local block, callback = objc.block(function(line, pstop)
+	s:enumerateLinesUsingBlock(block(function(line, pstop)
 		t[#t+1] = line:UTF8String()
 		if #t == 2 then --stop at line 2
 			pstop[0] = 1
 		end
-	end, 'v@^B')
-	s:enumerateLinesUsingBlock(block)
-	callback:free()
+	end, {'@','^B'}))
 	assert(#t == 2)
 	assert(t[1] == 'line1')
 	assert(t[2] == 'line2')
 end
 
 function test.tolua()
-	local n = objc.toobj(123.5)
-	assert(objc.isa(n, 'NSNumber'))
-	assert(objc.tolua(n) == 123.5)
+	local n = toobj(123.5)
+	assert(isa(n, 'NSNumber'))
+	assert(tolua(n) == 123.5)
 
-	local s = objc.toobj'hello'
-	assert(objc.isa(s, 'NSString'))
-	assert(objc.tolua(s) == 'hello')
+	local s = toobj'hello'
+	assert(isa(s, 'NSString'))
+	assert(tolua(s) == 'hello')
 
 	local a = {1,2,6,7}
-	local t = objc.toobj(a)
+	local t = toobj(a)
 	assert(t:count() == #a)
 	for i=1,#a do
 		assert(t:objectAtIndex(i-1):doubleValue() == a[i])
 	end
-	a = objc.tolua(t)
+	a = tolua(t)
 	assert(#a == 4)
 	assert(a[3] == 6)
 
 	local d = {a = 1, b = 'baz', d = {1,2,3}, [{x=1}] = {y=2}}
-	local t = objc.toobj(d)
+	local t = toobj(d)
 	assert(t:count() == 4)
-	assert(objc.tolua(t:valueForKey(objc.toobj'a')) == d.a)
-	assert(objc.tolua(t:valueForKey(objc.toobj'b')) == d.b)
-	assert(objc.tolua(t:valueForKey(objc.toobj'd'))[2] == 2)
+	assert(tolua(t:valueForKey(toobj'a')) == d.a)
+	assert(tolua(t:valueForKey(toobj'b')) == d.b)
+	assert(tolua(t:valueForKey(toobj'd'))[2] == 2)
 end
 
 function test.args()
-	local s = objc.NSString:alloc():initWithUTF8String'\xE2\x82\xAC' --euro symbol
+	local s = NSString:alloc():initWithUTF8String'\xE2\x82\xAC' --euro symbol
 	--return string
 	assert(s:UTF8String() == '\xE2\x82\xAC')
 	--return boolean (doesn't work for methods)
-	assert(s:isAbsolutePath() == 0)
+	assert(s:isAbsolutePath() == false)
 	--return null
-	assert(type(s:cStringUsingEncoding(objc.NSASCIIStringEncoding)) == 'nil')
+	assert(type(s:cStringUsingEncoding(NSASCIIStringEncoding)) == 'nil')
 	--selector arg
-	assert(objc.NSObject:respondsToSelector'methodForSelector:' == 1)
+	assert(s:respondsToSelector'methodForSelector:' == true)
 	--class arg
-	assert(objc.NSArray:isSubclassOfClass'NSObject' == 1)
-	assert(objc.NSArray:isSubclassOfClass'XXX' == 0)
+	assert(NSArray:isSubclassOfClass'NSObject' == true)
+	assert(NSArray:isSubclassOfClass'XXX' == false)
 	--string arg
-	assert(objc.NSString:alloc():initWithString('hey'):UTF8String() == 'hey')
+	assert(NSString:alloc():initWithString('hey'):UTF8String() == 'hey')
 	--table arg for array
-	local a = objc.NSArray:alloc():initWithArray{6,25,5}
+	local a = NSArray:alloc():initWithArray{6,25,5}
 	assert(a:objectAtIndex(1):doubleValue() == 25)
 	--table arg for dictionary
-	local d = objc.NSDictionary:alloc():initWithDictionary{a=5,b=7}
+	local d = NSDictionary:alloc():initWithDictionary{a=5,b=7}
 	assert(d:valueForKey('b'):doubleValue() == 7)
 end
 
-function eyetest.window()
+function demo.window()
 	objc.load'AppKit'
 
-	local pool = objc.NSAutoreleasePool:new()
-	local NSApp = objc.class('NSApp', 'NSApplication <NSApplicationDelegate>')
+	local NSApp = class('NSApp', 'NSApplication <NSApplicationDelegate>')
 
 	--we need to add methods to the class before creating any objects!
 	--note: NSApplicationDelegate is an informal protocol brought from bridgesupport.
 
 	function NSApp:applicationShouldTerminateAfterLastWindowClosed()
 		print'last window closed...'
+		collectgarbage()
 		return true
 	end
 
@@ -447,9 +452,9 @@ function eyetest.window()
 
 	local app = NSApp:sharedApplication()
 	app:setDelegate(app)
-	app:setActivationPolicy(objc.NSApplicationActivationPolicyRegular)
+	app:setActivationPolicy(NSApplicationActivationPolicyRegular)
 
-	local NSWin = objc.class('NSWin', 'NSWindow <NSWindowDelegate>')
+	local NSWin = class('NSWin', 'NSWindow <NSWindowDelegate>')
 
 	--we need to add methods to the class before creating any objects!
 	--note: NSWindowDelegate is a formal protocol brought from the runtime.
@@ -459,17 +464,119 @@ function eyetest.window()
 	end
 
 	local style = bit.bor(
-						objc.NSTitledWindowMask,
-						objc.NSClosableWindowMask,
-						objc.NSMiniaturizableWindowMask,
-						objc.NSResizableWindowMask)
+						NSTitledWindowMask,
+						NSClosableWindowMask,
+						NSMiniaturizableWindowMask,
+						NSResizableWindowMask)
 
-	local win = objc.NSWin:alloc():initWithContentRect_styleMask_backing_defer(
-						objc.NSMakeRect(100, 100, 500, 300), style, objc.NSBackingStoreBuffered, false)
+	local win = NSWin:alloc():initWithContentRect_styleMask_backing_defer(
+						NSMakeRect(300, 300, 500, 300), style, NSBackingStoreBuffered, false)
 	win:setDelegate(win)
+	win:setTitle"▀▄▀▄▀▄ [ Lua Rocks ] ▄▀▄▀▄▀"
 
 	app:activateIgnoringOtherApps(true)
 	win:makeKeyAndOrderFront(nil)
+
+	app:run()
+end
+
+function demo.speech()
+	objc.load'AppKit'
+	local speech = NSSpeechSynthesizer:new()
+	voiceid = NSSpeechSynthesizer:availableVoices():objectAtIndex(11)
+	speech:setVoice(voiceid)
+	speech:startSpeakingString'Calm, fitter, healthier, and more productive; A pig. In a cage. On antibiotics.'
+	while speech:isSpeaking() do
+		os.execute'sleep 1'
+	end
+end
+
+function demo.http() --what a dense word soup just to make a http request
+	objc.load'AppKit'
+	local app = NSApplication:sharedApplication()
+
+	local post = NSString:stringWithFormat('firstName=%@&lastName=%@&eMail=%@&message=%@',
+						toobj'Dude', toobj'Edud', toobj'x@y.com', toobj'message')
+	local postData = post:dataUsingEncoding(NSUTF8StringEncoding)
+	local postLength = NSString:stringWithFormat('%ld', postData:length())
+
+	NSLog('Post data: %@', post)
+
+	local request = NSMutableURLRequest:new()
+	request:setURL(NSURL:URLWithString'http://posttestserver.com/post.php')
+	request:setHTTPMethod'POST'
+	request:setValue_forHTTPHeaderField(postLength, 'Content-Length')
+	request:setValue_forHTTPHeaderField('application/x-www-form-urlencoded', 'Content-Type')
+	request:setHTTPBody(postData)
+
+	NSLog('%@', request)
+
+	local CD = class('ConnDelegate', 'NSObject <NSURLConnectionDelegate, NSURLConnectionDataDelegate>')
+
+	function CD:connection_didReceiveData(conn, data)
+		self.webData:appendData(data)
+		NSLog'Connection received data'
+	end
+
+	function CD:connection_didReceiveResponse(conn, response)
+		NSLog'Connection received response'
+		NSLog('%@', response:description())
+	end
+
+	function CD:connection_didFailWithError(conn, err)
+		NSLog('Connection error: %@', err:localizedDescription())
+		app:terminate(nil)
+	end
+
+	function CD:connectionDidFinishLoading(conn)
+		NSLog'Connection finished loading'
+		local html = NSString:alloc():initWithBytes_length_encoding(self.webData:mutableBytes(),
+																self.webData:length(), NSUTF8StringEncoding)
+		NSLog('OUTPUT:\n%@', html)
+		app:terminate(nil)
+	end
+
+	local cd = ConnDelegate:new()
+	cd.webData = NSMutableData:new()
+
+	local conn = NSURLConnection:alloc():initWithRequest_delegate_startImmediately(request, cd, false)
+	conn:start()
+
+	app:run()
+end
+
+function demo.http_gcd()
+	objc.load'AppKit'
+	local app = NSApplication:sharedApplication()
+
+	local url = NSURL:URLWithString'http://posttestserver.com/post.php'
+	local req = NSURLRequest:requestWithURL(url)
+
+	local queue = dispatch.main_queue --dispatch.get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)
+
+	objc.debug.logtopics.block = true
+
+	local n = 0
+	local blk = block(function()
+		n = n + 1
+		print('called', n)
+
+		local response = ffi.new'id[1]'
+		local err = ffi.new'id[1]'
+		local data = NSURLConnection:sendSynchronousRequest_returningResponse_error(req, response, err)
+
+		print(tolua(NSString:alloc():initWithBytes_length_encoding(
+						data:mutableBytes(), data:length(), NSUTF8StringEncoding)))
+
+		if n == 2 then
+			print'ok, hit Ctrl+C (twice)'
+		end
+	end)
+	dispatch.async(queue, blk)  --increase refcount
+	dispatch.async(queue, blk)  --increase refcount
+	print'queued'
+	blk = nil; collectgarbage() --decrease refcount (stil queued)
+	print'released'
 	app:run()
 end
 
@@ -486,22 +593,22 @@ end
 
 function eyetest.inspect_classes()
 	load_many_frameworks()
-	objc.inspect.classes()
+	inspect.classes()
 end
 
 function eyetest.inspect_protocols()
 	load_many_frameworks()
-	objc.inspect.protocols()
+	inspect.protocols()
 end
 
 function eyetest.inspect_class_properties(cls)
 	load_many_frameworks()
-	objc.inspect.class_properties(cls)
+	inspect.class_properties(cls)
 end
 
 function eyetest.inspect_protocol_properties(proto)
 	load_many_frameworks()
-	objc.inspect.protocol_properties(proto)
+	inspect.protocol_properties(proto)
 end
 
 local function req(s)
@@ -510,32 +617,32 @@ end
 
 function eyetest.inspect_class_methods(cls, inst)
 	load_many_frameworks()
-	objc.inspect.class_methods(req(cls), inst == 'inst')
+	inspect.class_methods(req(cls), inst == 'inst')
 end
 
 function eyetest.inspect_protocol_methods(proto, inst, required)
 	load_many_frameworks()
-	objc.inspect.protocol_methods(req(proto), inst == 'inst', required == 'required')
+	inspect.protocol_methods(req(proto), inst == 'inst', required == 'required')
 end
 
 function eyetest.inspect_class_ivars(cls)
 	load_many_frameworks()
-	objc.inspect.class_ivars(req(cls))
+	inspect.class_ivars(req(cls))
 end
 
 function eyetest.inspect_class(cls)
 	load_many_frameworks()
-	objc.inspect.class(cls)
+	inspect.class(cls)
 end
 
 function eyetest.inspect_protocol(proto)
 	load_many_frameworks()
-	objc.inspect.protocol(proto)
+	inspect.protocol(proto)
 end
 
 function eyetest.inspect_find(patt)
 	load_many_frameworks()
-	objc.inspect.find(patt)
+	inspect.find(patt)
 end
 
 --------------
@@ -556,25 +663,26 @@ end
 
 --cmdline interface
 
-local test_name = ...
-
-if not test_name then
-	print('Usage: '..luajit..' '..arg[0]..' <test>')
-	print'Available tests:'
-	for k in glue.sortedpairs(test) do
-		print('', k)
+local function run(...)
+	local testname = ...
+	if not testname then
+		print('Usage: '..luajit..' '..arg[0]..' <test>')
+		print'Available tests:'
+		for k,t in glue.sortedpairs(tests) do
+			printf('Available %s:', k)
+			for k in glue.sortedpairs(t) do
+				print('', k)
+			end
+		end
+	else
+		local test = test[testname] or eyetest[testname] or demo[testname]
+		if not test then
+			printf('Invalid test "%s"', tostring(testname))
+			os.exit(1)
+		end
+		test(select(2, ...))
+		print'ok'
 	end
-	print'Available eye tests:'
-	for k in glue.sortedpairs(eyetest) do
-		print('', k)
-	end
-else
-	local test = test[test_name] or eyetest[test_name]
-	if not test then
-		print('Invalid test '..tostring(test_name))
-		os.exit(1)
-	end
-	test(select(2, ...))
-	print'ok'
 end
 
+run(...)

@@ -1,10 +1,9 @@
---objecive-c runtime binding (Cosmin Apreutesei, public domain).
+--objecive-c runtime+bridgesupport binding (Cosmin Apreutesei, public domain).
 --ideas and code from TLC by Fjölnir Ásgeirsson (c) 2012, MIT license.
 --tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9.
 
 local ffi = require'ffi'
 local bit = require'bit'
-local _, expat = pcall(require, 'expat') --not needed if bridgesupport not used
 
 if ffi.arch ~= 'arm' and ffi.os == 'OSX' then
 	ffi.load('libobjc.A.dylib', true)
@@ -65,6 +64,7 @@ Method class_getInstanceMethod(Class aClass, SEL aSelector);
 SEL method_getName(Method method);
 const char *method_getTypeEncoding(Method method);
 IMP method_getImplementation(Method method);
+BOOL class_respondsToSelector(Class cls, SEL sel);
 IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
 
 //protocols
@@ -100,7 +100,8 @@ Protocol **class_copyProtocolList(Class cls, unsigned int *outCount);
 Protocol **protocol_copyProtocolList(Protocol *proto, unsigned int *outCount);
 Ivar * class_copyIvarList(Class cls, unsigned int *outCount);
 
-//messages
+//instances
+Class object_getClass(id object);
 id objc_msgSend(id theReceiver, SEL theSelector, ...);
 ]]
 
@@ -113,13 +114,13 @@ setfenv(1, P)                                 --non-locals go in P
 
 local _ = string.format
 local id_ctype = ffi.typeof'id'
-local intptr_ctype = ffi.typeof'intptr_t'
-local class_ctype = ffi.typeof'Class'
 
 local function ptr(p) --convert NULL pointer to nil for easier handling (say 'not ptr' instead of 'ptr == nil')
 	if p == nil then return nil end
 	return p
 end
+
+local intptr_ctype = ffi.typeof'intptr_t'
 
 local function nptr(p) --convert pointer to lua number for using as table key
 	if p == nil then return nil end
@@ -147,7 +148,7 @@ local function memoize(func, cache) --special memoize that works with pointer ar
 		if type(key) == 'cdata' then
 			key = nptr(key)
 		end
-		assert(key ~= nil, 'nil object')
+		if key == nil then return end
 		local ret = rawget(cache, key)
 		if ret == nil then
 			ret = func(input)
@@ -236,7 +237,7 @@ local function declare(name, namespace, cdecl) --define a C type, const or funct
 	if ok then
 		cnames[namespace][1] = cnames[namespace][1] + 1
 		if printcdecl then
-			print(cdecl)
+			print(cdecl .. ';')
 		end
 	else
 		if cdeferr == 'table overflow' then --fatal error from luajit: no more space for ctypes
@@ -244,18 +245,29 @@ local function declare(name, namespace, cdecl) --define a C type, const or funct
 		end
 		err('cdef', '%s\n\t%s', cdeferr, cdecl)
 	end
-	if not checkredef then error(name) end
 	cnames[namespace][name] = checkredef and cdecl or true --only store the cdecl if needed
 	return ok
 end
 
---type encodings (conversion to C type declarations) ---------------------------------------------------------------------
+--type encodings: parsing and conversion to C types ----------------------------------------------------------------------
+
+-- stype: a value type encoding: 'B', '^[8i]', '{CGPoint="x"d"y"d}'; converts to a ctype.
+-- mtype: a method type encoding: 'v12@0:4c8' or just 'v@:c'; converts to a ftype.
+-- ftype: a function/method type encoding in table form: {retval='v', '@', ':', 'c'}. converts to a ctype.
+-- ctype: a C type encoding for a stype or a ftype: 'BOOL', 'void (*) (SEL, Class, char)'.
+
+--ftype spec:
+--		variadic = true|nil                        --vararg function
+--		isblock = true|nil                         --block or function (only for function pointers)
+--		fp = {retval = ftype, [argindex] = ftype}  --table of function pointer args or retvals
+--		retval = stype                             --return stype
+--		[argindex] = stype                         --arg stype
 
 local function optname(name) --format an optional name: if not nil, return it with a space in front
 	return name and ' '..name or ''
 end
 
-local type_ctype --fw. decl.
+local stype_ctype --fw. decl.
 
 local function array_ctype(s, name, ...) --('[Ntype]', 'name') -> ctype('type', 'name[N]')
 	local n,s = s:match'^%[(%d+)(.-)%]$'
@@ -265,7 +277,7 @@ local function array_ctype(s, name, ...) --('[Ntype]', 'name') -> ctype('type', 
 		name = _('(%s)', name)
 	end
 	name = _('%s[%d]', name or '', n)
-	return type_ctype(s, name, ...)
+	return stype_ctype(s, name, ...)
 end
 
 --note: `tag` means the struct tag in the C struct namespace; `name` means the typedef name in the C global namespace.
@@ -274,7 +286,7 @@ end
 local function struct_ctype(s, name, deftype, indent) --('{CGPoint="x"d"y"d}', 'NSPoint') -> 'struct CGPoint NSPoint'
 
 	--break the struct/union def. in its constituent parts: keyword, tag, fields
-	local kw, tag, fields = s:match'^(.)([^=]*)=?(.*).$' -- '{name=fields}'
+	local kw, tag, fields = s:match'^(.)([^=]*)=?(.*).$' -- '{tag=fields}'
 	kw = kw == '{' and 'struct' or 'union'
 	if tag == '?' or tag == '' then tag = nil end -- ? or empty means anonymous struct
 	if fields == '' then fields = nil end -- empty definition means opaque struct
@@ -297,7 +309,7 @@ local function struct_ctype(s, name, deftype, indent) --('{CGPoint="x"d"y"d}', '
 		local t = {}
 		local function addfield(name, s)
 			if name == '' then name = nil end --empty field name means unnamed struct (different from anonymous)
-			table.insert(t, type_ctype(s, name, 'cdef', true)) --eg. 'struct _NSPoint origin'
+			table.insert(t, stype_ctype(s, name, 'cdef', true)) --eg. 'struct _NSPoint origin'
 			return '' --remove the match
 		end
 		local s = fields
@@ -323,7 +335,7 @@ local function struct_ctype(s, name, deftype, indent) --('{CGPoint="x"d"y"d}', '
 
 		--named struct: cdef it.
 		--note: duplicate struct cdefs are rejected by luajit 2.0 with an error. we guard against that.
-		declare(tag, 'struct', ctype .. ';')
+		declare(tag, 'struct', ctype)
 	end
 
 	return _('%s %s%s', kw, tag, optname(name))
@@ -335,7 +347,7 @@ local function bitfield_ctype(s, name, deftype) --('bN', 'name') -> 'unsigned na
 end
 
 local function pointer_ctype(s, name, ...) --('^type', 'name') -> ctype('type', '*name')
-	return type_ctype(s:sub(2), '*'..(name or ''), ...)
+	return stype_ctype(s:sub(2), '*'..(name or ''), ...)
 end
 
 local function char_ptr_ctype(s, ...) --('*', 'name') -> 'char *name'
@@ -349,7 +361,7 @@ local function primitive_ctype(ctype)
 end
 
 function const_ctype(s, ...)
-	return 'const ' .. type_ctype(s:sub(2), ...)
+	return 'const ' .. stype_ctype(s:sub(2), ...)
 end
 
 local ctype_decoders = {
@@ -386,48 +398,74 @@ local ctype_decoders = {
 	['r'] = const_ctype,
 }
 
---convert a type encoding to a C type (as string)
+--convert a value type encoding (stype) to its C type, or, if name given, its C declaration.
 --3rd arg = 'cdef' means that named structs contain field names and thus can and should be cdef'ed before returning.
-function type_ctype(s, name, ...)
+function stype_ctype(s, name, ...)
 	local decoder = assert(ctype_decoders[s:sub(1,1)], s)
 	return decoder(s, name, ...)
 end
 
---decode a method type encoding returning (as strings):
---  the C type for the function
---  the C type for the return value
---  a list of C types for the arguments
-local function method_ctype(s, for_callback) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
-	local ret_ctype
-	local arg_ctypes = {}
-	local stop
-	local function addarg(modifier, s)
-		modifier = modifier:find'r' and 'r' or '' --skip other modifiers
-		s = modifier .. s --put modifier back
-		if stop then return '' end
-		--ffi callbacks don't work with pass-by-value structs, so we're going to stop at the first one.
-		local struct_byval = for_callback and s:find'^[{%(]'
-		if not ret_ctype then
-			ret_ctype = struct_byval and 'void' or type_ctype(s)
-		elseif not struct_byval then
-			table.insert(arg_ctypes, type_ctype(s))
+--decode a method type encoding (mtype), and return its table representation (ftype).
+--note: other type annotations like `variadic` and `isblock` come from bridgesupport attributes.
+local function mtype_ftype(mtype) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
+	local ftype = {}
+	local function addarg(annotations, s)
+		if annotations:find'r' then
+			s = 'r' .. s
+		end
+		if not ftype.retval then
+			ftype.retval = s
 		else
-			stop = true
+			table.insert(ftype, s)
 		end
 		return '' --remove the match
 	end
-	local n
+	local s,n = mtype
 	while s ~= '' do
 		               s,n = s:gsub('^([rnNoORV]*)([%^]*%b{})%d*',     addarg)     --try {...}offset
 		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*%b())%d*',     addarg) end --try (...)offset
 		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*%b[])%d*',     addarg) end --try [...]offset
-		if n == 0 then s,n = s:gsub('^([rnNoORV]*)(@)%?%d*',           addarg) end --try @? (block type)
+		if n == 0 then s,n = s:gsub('^([rnNoORV]*)(@%?)%d*',           addarg) end --try @? (block type)
 		if n == 0 then s,n = s:gsub('^([rnNoORV]*)(@"[A-Z][^"]+")%d*', addarg) end --try @"Class"offset
 		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*[cislqCISLQfdDBv%?@#%:%*])%d*', addarg) end --try <primitive>offset
-		assert(n > 0, fields)
+		assert(n > 0, mtype)
 	end
-	local ctype_string = _('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
-	return ctype_string, ret_ctype, arg_ctypes
+	return ftype --{retval = stype, [argindex] = stype, ...}
+end
+
+--format a table representation of a method or function (ftype) to its C type or, if name given, its C declaration.
+--3rd arg = true means the type will be used for a ffi callback, which incurs some limitations.
+local function ftype_ctype(ftype, name, for_callback)
+	local retval = ftype.retval
+	local lastarg = #ftype
+	if for_callback then
+		--ffi callbacks don't work with pass-by-value structs, so we're going to stop at the first one.
+		for i = 1, #ftype do
+			if ftype[i]:find'^[%{%(]' then
+				lastarg = i - 1
+			end
+		end
+		--they also don't can't return structs directly.
+		if retval and retval:find'^[%{%(]' then
+			retval = nil
+		end
+	end
+	local t = {}
+	for i = 1, lastarg do
+		t[i] = stype_ctype(ftype[i])
+	end
+	local args = table.concat(t, ', ')
+	local retval = retval and stype_ctype(retval) or 'void'
+	local vararg = not for_callback and ftype.variadic and (#t > 0 and ', ...' or '...') or ''
+	if name then
+		return _('%s %s (%s%s)', retval, name, args, vararg)
+	else
+		return _('%s (*) (%s%s)', retval, args, vararg)
+	end
+end
+
+local function ftype_mtype(ftype) --convert ftype to type encoding
+	return (ftype.retval or 'v') .. table.concat(ftype)
 end
 
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
@@ -435,18 +473,20 @@ end
 lazyfuncs = true --cdef functions on the first call rather than at the time of parsing the xml (see below)
 loaddeps = false --load dependencies specified in the bridgesupport file (usually too many to be useful)
 
+--rename tables to prevent name clashes
+
 rename = {string = {}, enum = {}, typedef = {}, const = {}, ['function'] = {}} --rename table to solve name clashing
 
 rename.typedef.mach_timebase_info = 'mach_timebase_info_t'
 rename.const.TkFont = 'const_TkFont'
 
-local function global(name, kind) --use a rename table to do renaming of certain problematic globals
+local function global(name, kind) --return the "fixed" name for a given global name
 	return rename[kind][name] or name
 end
 
-local xml    = {} --{expat_callback = handler}
-local tag    = {} --{tag = start_tag_handler}
-local endtag = {} --{tag = end_tag_handler}
+--xml tag handlers
+
+local tag = {} --{tag = start_tag_handler}
 
 function tag.depends_on(attrs)
 	if not loaddeps then return end
@@ -460,25 +500,31 @@ local typekey = ffi.abi'64bit' and 'type64' or 'type'
 local valkey = ffi.abi'64bit' and 'value64' or 'value'
 
 function tag.string_constant(attrs)
-	rawset(objc, global(attrs.name, 'string'), attrs.value) --TODO: wrap NSStrings
+	--note: some of these are NSStrings but we load them all as Lua strings.
+	rawset(objc, global(attrs.name, 'string'), attrs.value)
 end
 
 function tag.enum(attrs)
 	if attrs.ignore == 'true' then return end
+
 	local s = attrs[valkey] or attrs.value
 	if not s then return end --value not available on this platform
+
 	rawset(objc, global(attrs.name, 'enum'), tonumber(s))
 end
 
 local function cdef_node(attrs, typedecl, deftype)
 	local name = global(attrs.name, typedecl)
+
 	--note: duplicate typedef and const defs are ignored by luajit 2.0 and don't overflow its ctype table,
 	--but this is an implementation detail that we shouldn't rely on, so we guard against redefinitions.
 	if defined(name, 'global') then return end
+
 	local s = attrs[typekey] or attrs.type
 	if not s then return end --type not available on this platform
-	local ctype = type_ctype(s, name, deftype)
-	declare(name, 'global', _('%s %s;', typedecl, ctype))
+
+	local ctype = stype_ctype(s, name, deftype)
+	declare(name, 'global', _('%s %s', typedecl, ctype))
 end
 
 function tag.constant(attrs)
@@ -497,111 +543,273 @@ function tag.opaque(attrs)
 	cdef_node(attrs, 'typedef')
 end
 
-local ftag --state for accumulating args on the current 'function' tag
+--arg or retval tag with function_pointer attribute
 
-tag['function'] = function(attrs)
-	local name = global(attrs.name, 'function')
-	--note: duplicate function defs are ignored by luajit 2.0 but they do overflow its ctype table,
-	--so it's necessary that we guard against redefinitions.
-	if defined(name, 'global') then return end
-	ftag = {name = name, retval = type_ctype'v', args = {},
-				variadic = attrs.variadic == 'true', arg_depth = 0}
+local function fp_arg(argtag, attrs, getwhile)
+	if attrs.function_pointer ~= 'true' then
+		return
+	end
+
+	local argtype = attrs[typekey] or attrs.type
+	local fp = {isblock = argtype == '@?' or nil}
+
+	for tag, attrs in getwhile(argtag) do
+		if tag == 'arg' or tag == 'retval' then
+
+			if fp then
+				local argtype = attrs[typekey] or attrs.type
+				if not argtype then --type not available on this platform: skip the entire argtag
+					fp = nil
+				else
+					local argindex = tag == 'retval' and 'retval' or #fp + 1
+					fp[argindex] = argtype
+				end
+			end
+
+			local fp1 = fp_arg(tag, attrs, getwhile) --fpargs can have fpargs too
+			if fp and fp1 then
+				local argindex = tag == 'retval' and 'retval' or #fp + 1
+				fp.fp = fp.fp or {}
+				fp.fp[argindex] = fp1
+			end
+
+			for _ in getwhile(tag) do end --eat it because it might be the same as argtag
+		end
+	end
+
+	return fp
 end
 
-function tag.retval(attrs)
-	if not ftag then return end --canceled by prev. tag.arg
-	ftag.arg_depth = ftag.arg_depth + 1
-	if ftag.arg_depth > 1 then return end --skip child 'retval' types describing function pointers
-	local s = attrs[typekey] or attrs.type
-	if not s then ftag = nil; return end --arg not available on 32bit, cancel the recording
-	ftag.retval = type_ctype(s)
-end
+--function tag
 
-function tag.arg(attrs)
-	if not ftag then return end --canceled by prev. tag.arg or tag.retval
-	ftag.arg_depth = ftag.arg_depth + 1
-	if ftag.arg_depth > 1 then return end --skip child 'arg' types which describe function pointers
-	local s = attrs[typekey] or attrs.type
-	if s == '@?' then s = '@' end --block definition
-	if not s then ftag = nil; return end --arg not available on 32bit, skip the entire function
-	table.insert(ftag.args, type_ctype(s))
-end
+local function_caller --fw. decl.
 
-local function dec_arg_depth(attrs)
-	if not ftag then return end
-	ftag.arg_depth = ftag.arg_depth - 1
-end
+local function add_function(name, ftype, lazy) --cdef and call-wrap a global C function
+	if lazy == nil then lazy = lazyfuncs end
 
-endtag.arg = dec_arg_depth
-endtag.retval = dec_arg_depth
+	local function addfunc()
+		declare(name, 'global', ftype_ctype(ftype, name))
+		local cfunc = C[name]
+		local caller = function_caller(ftype, cfunc)
+		rawset(objc, name, caller) --overshadow the C function with the caller
+		return caller
+	end
 
-endtag['function'] = function()
-	if not ftag then return end --canceled by prev. tag.arg or tag.retval
-	local args = table.concat(ftag.args, ', ')
-	local vararg = ftag.variadic and (#ftag.args > 0 and ', ...' or '...') or ''
-	local cdecl = _('%s %s (%s%s);', ftag.retval, ftag.name, args, vararg)
-	local name = ftag.name
-	ftag = nil
-	if lazyfuncs then
-		if redefined(name, 'global', cdecl) then return end
+	if lazy then
 		--delay cdef'ing the function until the first call, to avoid polluting the C namespace with unused declarations.
 		--this is because in luajit2 can only hold as many as 64k ctypes total.
 		rawset(objc, name, function(...)
-			declare(name, 'global', cdecl)
-			local func = C[name]
-			rawset(objc, name, nil) --remove this wrapper; later calls will go to the C namespace directly.
-			return func(...)
+			return addfunc()(...)
 		end)
 	else
-		declare(name, 'global', cdecl)
+		addfunc()
 	end
 end
 
-function tag.function_alias(attrs) --these tags always come after the 'function' tags
-	local name = attrs.name
-	local original = attrs.original
-	if lazyfuncs then
-		--delay getting a cdef to the original function until the first call to the alias
-		rawset(objc, name, function(...)
-			local func = C[original]
-			rawset(objc, name, func) --replace this wrapper with the original function
-			return func(...)
-		end)
-	else
-		if csymbol(original) then
-			rawset(objc, name, C[original])
-		else
-			err('alias', 'symbol not found %s for %s', original, name)
+tag['function'] = function(attrs, getwhile)
+	local name = global(attrs.name, 'function') --get the "fixed" name
+
+	--note: duplicate function defs are ignored by luajit 2.0 but they do overflow its ctype table,
+	--so it's necessary that we guard against redefinitions.
+	if defined(name, 'global') then return end
+
+	local ftype = {variadic = attrs.variadic == 'true' or nil}
+
+	for tag, attrs in getwhile'function' do
+		if ftype and (tag == 'arg' or tag == 'retval') then
+
+			local argtype = attrs[typekey] or attrs.type
+			if not argtype then --type not available on this platform: skip the entire function
+				ftype = nil
+			else
+				local argindex = tag == 'retval' and 'retval' or #ftype + 1
+				ftype[argindex] = argtype
+
+				local fp = fp_arg(tag, attrs, getwhile)
+				if fp then
+					ftype.fp = ftype.fp or {}
+					ftype.fp[argindex] = fp
+				end
+			end
 		end
 	end
+
+	if ftype then
+		add_function(name, ftype)
+	end
 end
+
+--informal_protocol tag
 
 local add_informal_protocol --fw. decl.
 local add_informal_protocol_method --fw. decl.
 
-local proto --informal_protocol object for the current 'informal_protocol' tag
-
-function tag.informal_protocol(attrs)
-	proto = add_informal_protocol(attrs.name)
+function tag.informal_protocol(attrs, getwhile)
+	local proto = add_informal_protocol(attrs.name)
+	for tag, attrs in getwhile'informal_protocol' do
+		if proto and tag == 'method' then
+			local mtype = attrs[typekey] or attrs.type
+			if mtype then
+				add_informal_protocol_method(proto, attrs.selector, attrs.class_method ~= 'true', mtype)
+			end
+		end
+	end
 end
 
-function tag.method(attrs)
-	if not proto then return end
-	local s = attrs[typekey] or attrs.type
-	if not s then return end --type not available on this platform
-	add_informal_protocol_method(proto, attrs.selector, attrs.class_method ~= 'true', s)
+--class tag
+
+--method type annotations: {[is_instance] = {classname = {methodname = partial-ftype}}.
+--only boolean retvals and function pointer args are recorded.
+mta = {[true] = {}, [false] = {}}
+
+function tag.class(attrs, getwhile)
+	local inst_methods = {}
+	local class_methods = {}
+	local classname = attrs.name
+
+	for tag, attrs in getwhile'class' do
+		if tag == 'method' then
+
+			local meth = {}
+			local inst = attrs.class_method ~= 'true'
+			meth.variadic = attrs.variadic == 'true' or nil
+			local methodname = attrs.selector
+
+			for tag, attrs in getwhile'method' do
+				if meth and (tag == 'arg' or tag == 'retval') then
+
+					local argtype = attrs[typekey] or attrs.type
+					--attrs.index is the arg. index starting from 0 after the first two arguments (obj, sel).
+					local argindex = tag == 'retval' and 'retval' or attrs.index + 1 + 2
+
+					if tag == 'retval' and argtype == 'B' then
+						meth.retval = 'B'
+					end
+
+					local fp = fp_arg(tag, attrs, getwhile)
+					if fp then
+						meth.fp = meth.fp or {}
+						meth.fp[argindex] = fp
+					end
+				end
+			end
+
+			if meth and next(meth) then
+				if inst then
+					inst_methods[methodname] = meth
+				else
+					class_methods[methodname] = meth
+				end
+			end
+		end
+	end
+
+	if next(inst_methods) then
+		mta[true][classname] = inst_methods
+	end
+	if next(class_methods) then
+		mta[false][classname] = class_methods
+	end
 end
 
-function xml.start_tag(name, attrs)
-	if tag[name] then tag[name](attrs) end
+local function method_annotations(classname, selname, inst, ftype)
+	local cls = mta[inst][classname]
+	return cls and cls[selname]
 end
 
-function xml.end_tag(name)
-	if endtag[name] then endtag[name]() end
+--function_alias tag
+
+function tag.function_alias(attrs) --these tags always come after the 'function' tags
+	local name = attrs.name
+	local original = attrs.original
+	--delay getting a cdef to the original function until the first call to the alias
+	rawset(objc, name, function(...)
+		local origfunc = objc[original]
+		rawset(objc, name, origfunc) --replace this wrapper with the original function
+		return origfunc(...)
+	end)
+end
+
+--xml tag processor that dispatches the processing of tags inside <signatures> tag to a table of tag handlers.
+--the tag handler gets the tag attributes and a conditional iterator to get any subtags.
+local function process_tags(gettag)
+
+	local function nextwhile(endtag)
+		local start, tag, attrs = gettag()
+		if not start then
+			if tag == endtag then return end
+			return nextwhile(endtag)
+		end
+		return tag, attrs
+	end
+	local function getwhile(endtag) --iterate tags until `endtag` ends, returning (tag, attrs) for each tag
+		return nextwhile, endtag
+	end
+
+	for tagname, attrs in getwhile'signatures' do
+		if tag[tagname] then
+			tag[tagname](attrs, getwhile)
+		end
+	end
+end
+
+--fast, push-style xml parser that works with the simple cocoa generated xml files.
+
+local function readfile(name)
+	local f = assert(io.open(name, 'rb'))
+	local s = f:read'*a'
+	f:close()
+	return s
+end
+
+local function parse_xml(path, write)
+	local s = readfile(path)
+	for endtag, tag, attrs, tagends in s:gmatch'<(/?)([%a_][%w_]*)([^/>]*)(/?)>' do
+		if endtag == '/' then
+			write(false, tag)
+		else
+			local t = {}
+			for name, val in attrs:gmatch'([%a_][%w_]*)=["\']([^"\']*)["\']' do
+				if val:find('&quot;', 1, true) then --gsub alone is way slower
+					val = val:gsub('&quot;', '"') --the only escaping found in all xml files tested
+				end
+				t[name] = val
+			end
+			write(true, tag, t)
+			if tagends == '/' then
+				write(false, tag)
+			end
+		end
+	end
+end
+
+--xml processor driver. runs a user-supplied tag processor function in a coroutine.
+--the processor receives a gettags() function to pull tags with, as its first argument.
+
+usexpat = false --choice of xml parser: expat or the lua-based parser above.
+
+local function process_xml(path, processor, ...)
+
+	local send = coroutine.wrap(processor)
+	send(coroutine.yield, ...) --start the parser by passing it the gettag() function and other user args.
+
+	if usexpat then
+		local expat = require'expat'
+		expat.parse({path = path}, {
+			start_tag = function(name, attrs)
+				send(true, name, attrs)
+			end,
+			end_tag = function(name)
+				send(false, name)
+			end,
+		})
+	else
+		parse_xml(path, send)
+	end
 end
 
 function load_bridgesupport(path)
-	expat.parse({path = path}, xml)
+	process_xml(path, process_tags)
 end
 
 --loading frameworks -----------------------------------------------------------------------------------------------------
@@ -671,7 +879,7 @@ end
 
 --selectors
 
-local selector_object = memoize(function(name) --caching to prevent string creation each method call (worth it?)
+local selector_object = memoize(function(name) --caching to prevent string creation on each method call (worth it?)
 	--replace '_' with ':' except at the beginning
 	name = name:match('^_*') .. name:gsub('^_*', ''):gsub('_', ':')
 	return ptr(C.sel_registerName(name))
@@ -683,7 +891,7 @@ local function selector(name)
 end
 
 local function selector_name(sel)
-    return ffi.string(ffi.C.sel_getName(sel))
+    return ffi.string(C.sel_getName(sel))
 end
 
 ffi.metatype('struct objc_selector', {
@@ -731,10 +939,18 @@ local function formal_protocol_methods(proto, inst, required) --inherited method
 	end
 end
 
-local function formal_protocol_method_type(proto, sel, inst, required) --looks in superprotocols too
+local function formal_protocol_mtype(proto, sel, inst, required) --looks in superprotocols too
 	local desc = C.protocol_getMethodDescription(proto, sel, required, inst)
 	if desc.name == nil then return end
 	return ffi.string(desc.types)
+end
+
+local function formal_protocol_ftype(...)
+	return mtype_ftype(formal_protocol_mtype(...))
+end
+
+local function formal_protocol_ctype(proto, sel, inst, required, for_callback)
+	return ftype_ctype(formal_protocol_ftype(proto, sel, inst, required), nil, for_callback)
 end
 
 ffi.metatype('struct Protocol', {
@@ -745,8 +961,10 @@ ffi.metatype('struct Protocol', {
 		protocols   = formal_protocol_protocols,
 		properties  = formal_protocol_properties,
 		property    = formal_protocol_property,
-		methods     = formal_protocol_methods,
-		method_type = formal_protocol_method_type,
+		methods     = formal_protocol_methods, --iterator() -> selname, mtype
+		mtype       = formal_protocol_mtype,
+		ftype       = formal_protocol_ftype,
+		ctype       = formal_protocol_ctype,
 	},
 })
 
@@ -771,8 +989,8 @@ function add_informal_protocol(name)
 	return proto
 end
 
-function add_informal_protocol_method(proto, selname, inst, type)
-	proto._methods[selname] = {_inst = inst, _type = type}
+function add_informal_protocol_method(proto, selname, inst, mtype)
+	proto._methods[selname] = {_inst = inst, _mtype = mtype}
 end
 
 function infprot:name()
@@ -784,33 +1002,38 @@ infprot_meta.__tostring = infprot.name
 function noop() return end
 
 function infprot:protocols()
-	return noop --not specified
+	return noop --not in bridgesupport
 end
 
 function infprot:properties()
-	return noop --not specified
+	return noop --not in bridgesupport
 end
 
 infprot.property = noop
 
 function infprot:methods(inst, required)
 	if required then return noop end --by definition, informal protocols do not contain required methods
-	local sel, m
-	return function()
-		while true do
-			sel, m = next(self._methods, sel)
-			if not sel then return end
+	return coroutine.wrap(function()
+		for sel, m in pairs(self._methods) do
 			if m._inst == inst then
-				return sel, m._type
+				coroutine.yield(sel, m._mtype)
 			end
 		end
-	end
+	end)
 end
 
-function infprot:method_type(sel, inst, required)
+function infprot:mtype(sel, inst, required)
 	if required then return end --by definition, informal protocols do not contain required methods
 	local m = self._methods[selector_name(sel)]
-	return m and m._inst == inst and m._type or nil
+	return m and m._inst == inst and m._mtype or nil
+end
+
+function infprot:ftype(...)
+	return mtype_ftype(self:mtype(...))
+end
+
+function infprot:ctype(sel, inst, required, for_callback)
+	return ftype_ctype(self:ftype(sel, inst, required), nil, for_callback)
 end
 
 --all protocols
@@ -838,7 +1061,7 @@ local function property_name(prop)
 end
 
 local prop_attr_decoders = { --TODO: copy, retain, nonatomic, dynamic, weak, gc.
-	T = function(s, t) t.type = s end,
+	T = function(s, t) t.stype = s end,
 	V = function(s, t) t.ivar = s end,
 	G = function(s, t) t.getter = s end,
 	S = function(s, t) t.setter = s end,
@@ -872,14 +1095,14 @@ local function property_setter(prop)
 	return attrs.setter
 end
 
-local function property_type(prop)
-	return property_attrs(prop).type
+local function property_stype(prop)
+	return property_attrs(prop).stype
 end
 
 local function property_ctype(prop)
 	local attrs = property_attrs(prop)
 	if not attrs.ctype then
-		attrs.ctype = type_ctype(attrs.type) --cache it
+		attrs.ctype = stype_ctype(attrs.stype) --cache it
 	end
 	return attrs.ctype
 end
@@ -898,7 +1121,7 @@ ffi.metatype('struct objc_property', {
 		name     = property_name,
 		getter   = property_getter,
 		setter   = property_setter,
-		type     = property_type,
+		stype    = property_stype,
 		ctype    = property_ctype,
 		readonly = property_readonly,
 		ivar     = property_ivar,
@@ -915,15 +1138,15 @@ local function method_name(method)
 	return selector_name(method_selector(method))
 end
 
-local function method_object_type(method)
+local function method_mtype(method) --NOTE: this is the raw runtime mtype, not corrected by mta.
 	return ffi.string(C.method_getTypeEncoding(method))
 end
 
-local function method_object_ctype(method)
-	return method_ctype(method_object_type(method))
+local function method_ftype(method) --NOTE: this is the raw runtime ftype, not corrected by mta.
+	return mtype_ftype(method_mtype(method))
 end
 
-local function method_implementation(method)
+local function method_implementation(method) --NOTE: this is of type IMP (i.e. vararg, untyped).
 	return ptr(C.method_getImplementation(method))
 end
 
@@ -932,8 +1155,8 @@ ffi.metatype('struct objc_method', {
 	__index = {
 		selector        = method_selector,
 		name            = method_name,
-		type            = method_object_type,
-		ctype           = method_object_ctype,
+		mtype           = method_mtype,
+		ftype           = method_ftype,
 		implementation  = method_implementation,
 	},
 })
@@ -950,6 +1173,7 @@ local function isobj(x)
 	return ffi.istype(id_ctype, x)
 end
 
+local class_ctype = ffi.typeof'Class'
 local function isclass(x)
 	return ffi.istype(class_ctype, x)
 end
@@ -1084,17 +1308,18 @@ function add_class_protocol(cls, proto, ...)
 end
 
 --find a selector in conforming protocols and if found, return its type
-local function conforming_method_type(cls, sel, inst)
+local function conforming_mtype(cls, sel)
+	local inst = not ismetaclass(cls)
 	for proto in class_protocols(cls) do
 		local mtype =
-			proto:method_type(sel, inst, false) or
-			proto:method_type(sel, inst, true)
+			proto:mtype(sel, inst, false) or
+			proto:mtype(sel, inst, true)
 		if mtype then
 			return mtype
 		end
 	end
 	if superclass(cls) then
-		return conforming_method_type(superclass(cls), sel, inst)
+		return conforming_mtype(superclass(cls), sel)
 	end
 end
 
@@ -1120,22 +1345,48 @@ end
 
 local callsuper --fw. decl.
 
-local function add_class_method(cls, sel, func, mtype)
-	cls = class(cls)
-	sel = selector(sel)
+--callback caller that inserts callsuper() as first arg.
+local function override_caller(obj, sel, func)
 	local selname = selector_name(sel)
-	local function callsuper_wrapper(obj, ...)
+	local function callsuper_caller(obj, ...)
 		return callsuper(obj, selname, ...)
 	end
-	local function wrapper(obj, sel, ...) --wrapper that inserts callsuper as first arg.
-		return func(obj, callsuper_wrapper, ...)
+	return function(obj, sel, ...)
+		return func(obj, callsuper_caller, ...)
 	end
-	local func_ctype = method_ctype(mtype, true)
-	local callback = ffi.cast(func_ctype, wrapper) --note: these callback objects can't be released
+end
+
+local callback_caller -- fw. decl.
+
+local function add_class_method(cls, sel, func, ftype)
+	cls = class(cls)
+	sel = selector(sel)
+	local mtype = ftype
+	if type(ftype) == 'string' then --it's a mtype, parse it
+		ftype = mtype_ftype(ftype)
+	else
+		mtype = ftype_mtype(ftype)
+	end
+	if superclass(cls) and C.class_respondsToSelector(superclass(cls), sel) == 1 then
+		--we're overriding: insert callsuper() as first arg for convenience.
+		local function callsuper_wrapper(obj, ...)
+			return callsuper(obj, selname, ...)
+		end
+		func = override_caller(obj, sel, func)
+	else
+		local f = func
+		func = function(obj, sel, ...) --wrap to skip sel arg
+			return f(obj, ...)
+		end
+	end
+	func = callback_caller(ftype, func)         --wrapper that converts args and return values.
+	local ctype = ftype_ctype(ftype, nil, true) --special callback ctype stripped of pass-by-val structs.
+	local callback = ffi.cast(ctype, func)      --note: this callback object pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
-	if logtopics.add_class_method then
-		log('add_class_method', '%-40s %-40s %s', selector_name(sel), mtype, func_ctype)
+	if logtopics.addmethod then
+		log('addmethod', '  %-40s %-40s %-8s %s', class_name(cls), selector_name(sel),
+									ismetaclass(cls) and 'class' or 'inst', ctype)
 	end
 end
 
@@ -1157,35 +1408,44 @@ local function ivar_offset(ivar) --this could be just an alias but we want to lo
 	return C.ivar_getOffset(ivar)
 end
 
-local function ivar_type(ivar)
+local function ivar_stype(ivar)
 	return ffi.string(C.ivar_getTypeEncoding(ivar))
 end
 
-local function ivar_ctype_string(ivar) --NOTE: bitfield ivars not supported (need ivar layouts for that)
-	local itype = ivar_type(ivar):match'^[rnNoORV]*(.*)'
-	return type_ctype('^'..itype, nil, itype:find'^[%{%(]%?' and 'cdef')
+local function ivar_stype_ctype(stype)
+	local stype = stype:match'^[rnNoORV]*(.*)'
+	return stype_ctype('^'..stype, nil, stype:find'^[%{%(]%?' and 'cdef')
 end
 
-local ivar_ctype = memoize2(function(cls, name)
-	return ffi.typeof(ivar_ctype_string(class_ivar(cls, name)))
+local function ivar_ctype(ivar) --NOTE: bitfield ivars not supported (need ivar layouts for that)
+	return ivar_stype_ctype(ivar_stype(ivar))
+end
+
+local ivar_stype_ffi_ctype = memoize(function(stype) --cache to avoid re-parsing and ctype creation
+	return ffi.typeof(ivar_stype_ctype(stype))
 end)
 
-local byteptr_ctype = 'uint8_t*'
+local function ivar_ffi_ctype(ivar)
+	return ivar_stype_ffi_ctype(ivar_stype(ivar))
+end
+
+local byteptr_ctype = ffi.typeof'uint8_t*'
 
 local function ivar_get_value(obj, name, ivar)
-	return ffi.cast(ivar_ctype(obj.isa, name), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
+	return ffi.cast(ivar_ffi_ctype(ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
 end
 
 local function ivar_set_value(obj, name, ivar, val)
-	ffi.cast(ivar_ctype(obj.isa, name), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
+	ffi.cast(ivar_ffi_ctype(ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
 end
 
 ffi.metatype('struct objc_ivar', {
 	__tostring = ivar_name,
 	__index = {
 		name = ivar_name,
-		type = ivar_type,
-		ctype = ivar_ctype_string,
+		stype = ivar_stype,
+		ctype = ivar_ctype,
+		ffi_ctype = ivar_ffi_ctype,
 		offset = ivar_offset,
 	},
 })
@@ -1220,60 +1480,31 @@ local function find_method(cls, selname)
 	end
 end
 
-local function find_conforming_method_type(cls, selname, inst)
+local function find_conforming_mtype(cls, selname)
 	local sel = selector(selname)
-	local mtype = conforming_method_type(cls, sel, inst)
+	local mtype = conforming_mtype(cls, sel)
 	if mtype then return sel, mtype end
 	if not selname:find'[_%:]$' then --method not found, try again with a trailing '_'
-		return find_conforming_method_type(cls, selname..'_', inst)
+		return find_conforming_mtype(cls, selname..'_')
 	end
 end
 
---class/instance method call wrapper that deals only with conversion of arguments and return values.
---these wrappers are the same for each method type hence they are memoized on method type alone.
+--ftype annotator
 
-local toobj --fw. decl.
-
-local method_call_wrapper = memoize(function(mtype)
-	local func_ctype, ret_ctype, arg_ctypes = method_ctype(mtype)
-	local func_ctype = ffi.typeof(func_ctype)
-
-	local function convert_ret(ret)
-		if ret == nil then
-			return nil --NULL -> nil
-		elseif ret_ctype == 'BOOL' then
-			return ret == 1 --BOOL -> boolean
-		elseif ret_ctype == 'char *' or ret_ctype == 'const char *' then
-			return ffi.string(ret)
-		else
-			return ret
+local function annotate_method_ftype(cls, sel, ftype)
+	local mta = method_annotations(class_name(cls), selector_name(sel), not ismetaclass(cls))
+	if mta then --override ftype with the partial mta ftype
+		for k,v in pairs(mta) do
+			ftype[k] = v
+		end
+	else --look in superclass
+		cls = superclass(cls)
+		if cls then
+			return annotate_method_ftype(cls, sel, ftype)
 		end
 	end
-
-	local function convert_arg(i, arg)
-		local ctype = arg_ctypes[i]
-		if ctype == 'SEL' then
-			return selector(arg) --selector, string
-		elseif ctype == 'Class' then
-			return class(arg) --class, obj, classname
-		elseif ctype == 'id' then
-			return toobj(arg) --string, number, array-table, dict-table, function->block
-		else
-			return arg
-		end
-	end
-
-	local function convert_args(i, ...)
-		if select('#', ...) == 0 then return end
-		return convert_arg(i, ...), convert_args(i + 1, select(2, ...))
-	end
-
-	return function(imp, obj, sel, ...)
-		obj = ffi.cast(id_ctype, obj) --because obj is the Class object for a class method
-		imp = ffi.cast(func_ctype, imp)
-		return convert_ret(imp(obj, sel, convert_args(3, ...)))
-	end
-end)
+	return ftype
+end
 
 --class/instance method caller based on loose selector names.
 
@@ -1284,7 +1515,7 @@ end)
 
 local refcounts = {} --number of collectable cdata references to an object
 
-local function add_refcount(obj, n)
+local function inc_refcount(obj, n)
 	local refcount = (refcounts[nptr(obj)] or 0) + n
 	if refcount == 0 then
 		refcount = nil
@@ -1294,12 +1525,12 @@ local function add_refcount(obj, n)
 end
 
 local function release_object(obj)
-	if not add_refcount(obj, -1) then
+	if not inc_refcount(obj, -1) then
 		luavars[nptr(obj)] = nil
 	end
 end
 
-local function collect_object(obj) --note: assume that this will be called multiple times on the same obj!
+local function collect_object(obj) --note: assume this will be called multiple times on the same obj!
 	obj:release()
 end
 
@@ -1310,14 +1541,18 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 	local sel, method = find_method(cls, selname)
 	if not sel then return end
 
-	local imp = method_implementation(method)
-	local wrapper = method_call_wrapper(method_object_type(method))
+	local ftype = method_ftype(method)
+	local ftype = annotate_method_ftype(cls, sel, ftype)
+	local ctype = ftype_ctype(ftype)
+	local func = method_implementation(method)
+	local func = ffi.cast(ctype, func)
+	local func = function_caller(ftype, func)
 
 	local can_retain = not noretain[selname]
 	local is_release = selname == 'release' or selname == 'autorelease'
 
 	return function(obj, ...)
-		local ok, ret = xpcall(wrapper, debug.traceback, imp, obj, sel, ...)
+		local ok, ret = xpcall(func, debug.traceback, obj, sel, ...)
 		if not ok then
 			check(false, '[%s %s] %s', tostring(cls), tostring(sel), ret)
 		end
@@ -1328,7 +1563,7 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 				log('release', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
 			end
 		end
-		if ffi.istype(id_ctype, ret) then
+		if isobj(ret) then
 			if can_retain then
 				ret = ret:retain() --retain() will make ret a strong reference so we don't have to
 				if logtopics.retain then
@@ -1336,7 +1571,7 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 				end
 			else
 				ffi.gc(ret, collect_object)
-				add_refcount(ret, 1)
+				inc_refcount(ret, 1)
 			end
 		end
 		return ret
@@ -1344,18 +1579,21 @@ local method_caller = memoize2(function(cls, selname) --method caller based on a
 end)
 
 --add, replace or override an existing/conforming instance/class method based on a loose selector name
-local function override(cls, selname, inst, func, mtype) --returns true if a method was found and created
+local function override(cls, selname, func, ftype) --returns true if a method was found and created
 	--look to override an existing method
-	local targetcls = inst and cls or metaclass(cls)
-	local sel, method = find_method(targetcls, selname)
+	local sel, method = find_method(cls, selname)
 	if sel then
-		add_class_method(targetcls, sel, func, mtype or method_object_type(method))
+		if not ftype then
+			ftype = method_ftype(method)
+			ftype = annotate_method_ftype(cls, sel, ftype)
+		end
+		add_class_method(cls, sel, func, ftype)
 		return true
 	end
 	--look to override/create a conforming method
-	local sel, cmtype = find_conforming_method_type(cls, selname, inst)
+	local sel, mtype = find_conforming_mtype(cls, selname)
 	if sel then
-		add_class_method(targetcls, sel, func, mtype or cmtype)
+		add_class_method(cls, sel, func, ftype or mtype)
 		return true
 	end
 end
@@ -1417,8 +1655,8 @@ local function set_existing_class_field(cls, field, val)
 		end
 	end
 	--look to override an instance/instance-conforming/class/class-conforming method, in this order
-	if override(cls, field, true, val) then return true end
-	if override(cls, field, false, val) then return true end
+	if override(cls, field, val) then return true end
+	if override(metaclass(cls), field, val) then return true end
 end
 
 --try to set, in order:
@@ -1530,49 +1768,98 @@ ffi.metatype('struct objc_object', {
 --http://clang.llvm.org/docs/Block-ABI-Apple.html
 
 ffi.cdef[[
-struct __block_descriptor_1 {
-	unsigned long int reserved;                    // NULL
-	unsigned long int size;                        // sizeof(struct __block_literal_1)
+typedef void (*dispose_helper_t) (void *src);
+typedef void (*copy_helper_t)    (void *dst, void *src);
+
+struct block_descriptor {
+	unsigned long int reserved;         // NULL
+	unsigned long int size;             // sizeof(struct block_literal)
+	copy_helper_t     copy_helper;      // IFF (1<<25)
+	dispose_helper_t  dispose_helper;   // IFF (1<<25)
 };
 
-struct __block_literal_1 {
-	struct __block_literal_1 *isa;
+struct block_literal {
+	struct block_literal *isa;
 	int flags;
 	int reserved;
 	void *invoke;
-	struct __block_descriptor_1 *descriptor;
+	struct block_descriptor *descriptor;
+	struct block_descriptor d; // because they come in pairs
 };
 
-struct __block_literal_1 *_NSConcreteGlobalBlock;
+struct block_literal *_NSConcreteGlobalBlock;
+struct block_literal *_NSConcreteStackBlock;
 ]]
 
-local block_descriptor = ffi.new'struct __block_descriptor_1'
-block_descriptor.reserved = 0
-block_descriptor.size = ffi.sizeof'struct __block_literal_1'
-local block_ctype = ffi.typeof'struct __block_literal_1'
+local voidptr_ctype        = ffi.typeof'void*'
+local block_ctype          = ffi.typeof'struct block_literal'
+local copy_helper_ctype    = ffi.typeof'copy_helper_t'
+local dispose_helper_ctype = ffi.typeof'dispose_helper_t'
 
---create a block and return it typecast to 'id' (also returns the callback object for freeing)
-local function block(func, mtype)
-	mtype = mtype or 'v'
-	local func_ctype, ret_ctype, arg_ctypes = method_ctype(mtype, true)
+--create a block and return it typecast to 'id'.
+--note: the automatic memory management part adds an overhead of 2 closures + 2 ffi callback objects.
+local function block(func, ftype)
 
-	--adjust func_ctype: first arg. is the block object
-	table.insert(arg_ctypes, 1, 'void *')
-	local func_ctype =	_('%s (*) (%s)', ret_ctype, table.concat(arg_ctypes, ', '))
+	if isobj(func) then
+		return func --must be a block, pass it through
+	end
 
-	local function wrapper(block, ...)
+	ftype = ftype or {'v'}
+	if type(ftype) == 'string' then
+		ftype = mtype_ftype(ftype)
+	end
+	table.insert(ftype, 1, '^v') --adjust ftype: first arg. is the block object
+	local ctype = ftype_ctype(ftype, nil, true)
+
+	local function caller(block, ...) --wrapper to remove the first arg
 		return func(...)
 	end
-	local callback = ffi.cast(func_ctype, wrapper)
+	local callback = ffi.cast(ctype, caller)
 
-	local block = block_ctype()
-	block.isa = C._NSConcreteGlobalBlock
-	block.flags = bit.lshift(1, 29)
-	block.reserved = 0
-	block.invoke = ffi.cast('void*', callback)
-	block.descriptor = block_descriptor
+	local refcount = 1
 
-	return ffi.cast(id_ctype, block), callback
+	local function copy(dst, src)
+		refcount = refcount + 1
+		log('block', 'copy\trefcount: %-8d', refcount)
+		assert(refcount >= 2)
+	end
+
+	local block
+	local copy_callback
+	local dispose_callback
+
+	local function dispose(src)
+		refcount = refcount - 1
+		if refcount == 0 then
+			block = nil --unpin it. this reference also serves to pin it until refcount is 0.
+			callback:free()
+			copy_callback:free()
+			dispose_callback:free()
+		end
+		log('block', 'dispose\trefcount: %-8d', refcount)
+		assert(refcount >= 0)
+	end
+
+	copy_callback = ffi.cast(copy_helper_ctype, copy)
+	dispose_callback = ffi.cast(dispose_helper_ctype, dispose)
+
+	block = block_ctype()
+
+	block.isa        = C._NSConcreteStackBlock --stack block because global blocks are not copied/disposed
+	block.flags      = bit.lshift(1, 25) --has copy & dispose helpers
+	block.reserved   = 0
+	block.invoke     = ffi.cast(voidptr_ctype, callback) --callback is pinned by dispose()
+	block.descriptor = block.d
+	block.d.reserved = 0
+	block.d.size     = ffi.sizeof(block_ctype)
+	block.d.copy_helper    = copy_callback
+	block.d.dispose_helper = dispose_callback
+
+	local block_object = ffi.cast(id_ctype, block) --block remains pinned by dispose()
+	ffi.gc(block_object, dispose)
+
+	log('block', 'create\trefcount: %-8d', refcount)
+	return block_object
 end
 
 --lua type conversions ---------------------------------------------------------------------------------------------------
@@ -1596,8 +1883,8 @@ function toobj(v) --convert a lua value to an objc object representing that valu
 			 end
 			 return arr
 		end
-	elseif type(v) == 'function' then
-		return (block(v))
+	elseif isclass(v) then
+		return ffi.cast(id_ctype, v) --TODO: find a better way to convert arg#1 for class methods
 	else
 		return v --pass through
 	end
@@ -1629,17 +1916,62 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 	end
 end
 
+--function call wrapper that deals only with conversion of arguments and return values.
+--these wrappers are the same for each method type hence they are memoized on method type alone.
+
+local function fp_callback(fp, arg)
+	return arg
+end
+
+function function_caller(ftype, func)
+
+	local function convert_ret(ret)
+		if ret == nil then
+			return nil --NULL -> nil
+		elseif ftype.retval == 'B' then
+			return ret == 1 --BOOL -> boolean
+		elseif ftype.retval == '*' or ftype.retval == 'r*' then
+			return ffi.string(ret)
+		else
+			return ret --pass through
+		end
+	end
+
+	local function convert_arg(i, arg)
+		local argtype = ftype[i]
+		if argtype == ':' then
+			return selector(arg) --selector, string
+		elseif argtype == '#' then
+			return class(arg) --class, obj, classname
+		elseif argtype == '@' then
+			return toobj(arg) --string, number, array-table, dict-table
+		elseif ftype.fp and ftype.fp[i] then
+			return fp_callback(ftype.fp, arg)
+		else
+			return arg --pass through
+		end
+	end
+
+	local function convert_args(i, ...)
+		if select('#', ...) == 0 then return end
+		return convert_arg(i, ...), convert_args(i + 1, select(2, ...))
+	end
+
+	return function(...)
+		return convert_ret(func(convert_args(1, ...)))
+	end
+end
+
+
+function callback_caller(ftype, func)
+	--TODO: convert fp args to function ctype
+	--TODO: convert ret. val with toobj() if fp.retval is '@'
+	return func
+end
+
 --publish everything -----------------------------------------------------------------------------------------------------
 
-objc.C = C
-objc.debug = P
-objc.load = load_framework
-objc.searchpaths = searchpaths
-
-objc.type_ctype = type_ctype
-objc.method_ctype = method_ctype
-
-local function objc_protocols(cls)
+local function objc_protocols(cls) --compressed API
 	if not cls then
 		return protocols()
 	else
@@ -1647,6 +1979,25 @@ local function objc_protocols(cls)
 	end
 end
 
+--debug
+objc.C = C
+objc.debug = P
+
+--manual declarations
+objc.addfunction = add_function
+objc.addprotocol = add_informal_protocol
+objc.addprotocolmethod = add_informal_protocol_method
+
+--loading frameworks
+objc.load = load_framework
+objc.searchpaths = searchpaths
+
+--low-level
+objc.stype_ctype = stype_ctype
+objc.mtype_ftype = mtype_ftype
+objc.ftype_ctype = ftype_ctype
+
+--runtime/get
 objc.SEL = selector
 objc.protocols = objc_protocols
 objc.protocol = protocol
@@ -1667,8 +2018,12 @@ objc.method = class_method
 objc.ivars = class_ivars
 objc.ivar = class_ivar
 objc.conform = add_class_protocol
+
+--runtime/add
 objc.override = override
 objc.addmethod = add_class_method
+
+--runtime/call
 objc.caller = function(cls, selname)
 	return
 		method_caller(class(cls), tostring(selname)) or
@@ -1676,22 +2031,28 @@ objc.caller = function(cls, selname)
 end
 objc.callsuper = callsuper
 
+--hi-level
 objc.block = block
 objc.toobj = toobj
 objc.tolua = tolua
 
-local submodules = {inspect = 'objc_inspect'} --{name = submodule-where-name-is-defined}
-
+--autoload
+local submodules = {
+	inspect = 'objc_inspect',   --inspection tools
+	dispatch = 'objc_dispatch', --GCD binding
+}
 local function autoload(k)
 	return submodules[k] and require(submodules[k]) and objc[k]
 end
 
+--dynamic namespace
 setmetatable(objc, {
 	__index = function(t, k)
 		return class(k) or csymbol(k) or autoload(k)
 	end,
 })
 
+--print namespace
 if not ... then
 	for k,v in pairs(objc) do
 		print(_('%-10s %s', type(v), 'objc.'..k))

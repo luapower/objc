@@ -4,31 +4,93 @@ platforms: osx32, osx64
 tagline:   Objective-C bridge
 ---
 
+## IN DEVELOPMENT (coming soon)
+
 ## `local objc = require'objc'`
 
 Objecive-C runtime and BridgeSupport binding.
 
-## Basic API
+## Quick Tour
+
+~~~{.lua}
+--load a framework by name; `objc.searchpaths` says where the frameworks are. you can also use full paths.
+--this loads the classes and protocols, but also C constants, enums, functions, structs and even macros.
+objc.load'Foundation'
+
+--instantiate a class. the resulting object is retained and released on gc.
+--you can call `release()` on it too, for a more speedy destruction.
+local str = objc.NSString:alloc():initWithUTF8String'wazza'
+
+--call methods with multiple arguments using underscores for ':'. last underscore is optional.
+--C constants, enums and functions are in the objc namespace too.
+local result = str:compare_options(otherStr, objc.NSLiteralSearch)
+
+--create a derived class. when creating a class, say which protocols you wish it conforms to,
+--so that you don't have to deal with type encodings when implementing its methods.
+objc.class('NSMainWindow', 'NSWindw <NSWindowDelegate>')
+
+--add methods to your class. the selector `windowWillClose` is from the `NSWindowDelegate` protocol
+--so its type encoding is inferred from the protocol definition. arg#1 is sugar for calling the supermethod.
+function objc.NSMainWindow:windowWillClose(callsuper, notification)
+	return callsuper(self, notification)
+end
+
+--add Lua variables to your objects - their lifetime is tied to the lifetime of the object.
+--you can also add class variables - they will be accessible through the objects too.
+objc.NSObject.myClassVar = 'I can live forever'
+local obj = objc.NSObject:new()
+obj.myInstanceVar = 'I live while obj lives'
+obj.myClassVar = 42 --change the class var (same value for all objects)
+
+--get and set class and instance properties using the dot notation.
+local pr = objc.NSProgress:progressWithTotalUnitCount(123)
+print(pr.totalUnitCount) --prints 123
+pr.totalUnitCount = 321  --sets it
+
+--get and set ivars using the dot notation.
+local obj = objc.NSDocInfo:new()
+obj.time = 123
+print(obj.time) --prints 123
+
+--create and use blocks manually. blocks are also created automatically when passing a Lua function
+--where a block is expected, but that creates callback objects that cannot be freed.
+--
+local str = objc.NSString:alloc():initWithUTF8String'line1\nline2\nline3'
+local block, callback = objc.block(function(line)
+	print(line:UTF8String()) --'char *' return values are also converted to Lua strings automatically
+end, 'v@^B')
+str:enumerateLinesUsingBlock(block)
+callback:free()
+
+
+~~~
+
+## API Refrence
 
 ----------------------------------------------------------- --------------------------------------------------------------
 __frameworks__
 
-`objc.load(name|path[, option])`										load a framework given its name or full path \
+`objc.load(name|path[, option])`										load a framework given its name or its full path \
 																				option 'notypes': don't load bridgesupport file
 
 `objc.searchpaths = {path1, ...}`									search paths for frameworks
 
 __selectors__
 
-`objc.selector(s|sel) -> sel`											create/find a selector by name
+`objc.SEL(s|sel) -> sel`												create/find a selector by name
 
 `sel:name() -> s`															selector's name (same as tostring(sel))
 
 __classes__
 
-`objc.class(name[, superclass[, proto, ...]]) -> cls`			create a class
+`objc.class'NSString' -> cls`											class by name (same as objc.NSString)
 
-`objc.class(name[, def]) -> cls`										create a class; def = 'ClassFoo <ProtocolBar, ProtocolBaz>`
+`objc.class(obj) -> cls`												class of instance
+
+`objc.class('Foo', 'SuperFoo <Protocol1, ...>') -> cls`		create a class
+
+`objc.class('Foo', 'SuperFoo', 'Protocol1', ...) -> cls`		create a class (alternative way)
+
 ----------------------------------------------------------- --------------------------------------------------------------
 
 
@@ -85,4 +147,9 @@ objc.debug.loadtypes (true)											load bridgesupport files
 `objc.debug.loaded -> {name = true}`								loaded frameworks
 `objc.debug.loaded_bs -> {name = true}`							frameworks for which bridgesupport was loaded too
 ----------------------------------------------------------- --------------------------------------------------------------
+
+## Quick Tutorial
+
+...
+
 
