@@ -1965,18 +1965,6 @@ end
 
 function function_caller(ftype, func) --wrap a function for automatic type conversion of its args and return value.
 
-	local function convert_ret(ret)
-		if ret == nil then
-			return nil --NULL -> nil
-		elseif ftype.retval == 'B' then
-			return ret == 1 --BOOL -> boolean
-		elseif ftype.retval == '*' or ftype.retval == 'r*' then
-			return ffi.string(ret)
-		else
-			return ret --pass through
-		end
-	end
-
 	local function convert_arg(i, arg)
 		local argtype = ftype[i]
 		if argtype == ':' then
@@ -1998,11 +1986,21 @@ function function_caller(ftype, func) --wrap a function for automatic type conve
 	end
 
 	return function(...)
-		return convert_ret(func(convert_args(1, ...)))
+		local ret = func(convert_args(1, ...))
+		if ret == nil then
+			return nil --NULL -> nil
+		elseif ftype.retval == 'B' then
+			return ret == 1 --BOOL -> boolean
+		elseif ftype.retval == '*' or ftype.retval == 'r*' then
+			return ffi.string(ret)
+		else
+			return ret --pass through
+		end
 	end
 end
 
 function callback_caller(ftype, func)
+
 	--TODO: convert fp args to function ctype
 	--TODO: convert ret. val with toobj() if fp.retval is '@'
 	return func
