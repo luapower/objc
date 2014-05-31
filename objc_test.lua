@@ -365,23 +365,67 @@ function test.properties()
 	assert(pr.indeterminate == false)
 end
 
+local timebase, last_time
+function timediff()
+	objc.load'System'
+	local time
+	time = mach_absolute_time()
+	if not timebase then
+		timebase = ffi.new'mach_timebase_info_data_t'
+		mach_timebase_info(timebase)
+	end
+	local d = tonumber(time - (last_time or 0)) * timebase.numer / timebase.denom / 10^9
+	last_time = time
+	return d
+end
+
 function test.blocks()
-	objc.debug.logtopics.block = true
+	--objc.debug.logtopics.block = true
+	local times = 20000
 
-	local s = NSString:alloc():initWithUTF8String('line1\nline2\nline3')
-	local t = {}
+	timediff()
 
-	--note: the signature of the block arg for enumerateLinesUsingBlock was detected as `void (*) (id, BOOL*)`
-
-	s:enumerateLinesUsingBlock(function(line, pstop)
-		t[#t+1] = line:UTF8String()
-		if #t == 2 then --stop at line 2
-			pstop[0] = 1
+	--take 1: creating blocks in inner loops with automatic memory management of blocks.
+	local s = NSString:alloc():initWithUTF8String'line1\nline2\nline3'
+	for i=1,times do
+		local t = {}
+		--note: the signature of the block arg for enumerateLinesUsingBlock was taken from bridgesupport.
+		s:enumerateLinesUsingBlock(function(line, pstop)
+			t[#t+1] = line:UTF8String()
+			if #t == 2 then --stop at line 2
+				pstop[0] = 1
+			end
+		end)
+		assert(#t == 2)
+		assert(t[1] == 'line1')
+		assert(t[2] == 'line2')
+		--note: callbacks are slow, expensive to create, and limited in number. we have to release them often!
+		if i % 200 == 0 then
+			collectgarbage()
 		end
-	end)
-	assert(#t == 2)
-	assert(t[1] == 'line1')
-	assert(t[2] == 'line2')
+	end
+
+	printf('take 1: block in loop (%d times): %4.2fs', times, timediff())
+
+	--take 2: creating a single block in the outer loop (we must give its type).
+	local t
+	local blk = block(function(line, pstop)
+			t[#t+1] = line:UTF8String()
+			if #t == 2 then --stop at line 2
+				pstop[0] = 1
+			end
+	end, argtype(NSString, 'enumerateLinesUsingBlock', 1)) --{'@','^B'}
+	local s = NSString:alloc():initWithUTF8String'line1\nline2\nline3'
+	for i=1,times do
+		t = {}
+		s:enumerateLinesUsingBlock(blk)
+		assert(#t == 2)
+		assert(t[1] == 'line1')
+		assert(t[2] == 'line2')
+	end
+
+	printf('take 2: single block  (%d times): %4.2fs', times, timediff())
+
 end
 
 function test.tolua()

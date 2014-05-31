@@ -113,20 +113,20 @@ setfenv(1, P)                                 --non-locals go in P
 --helpers ----------------------------------------------------------------------------------------------------------------
 
 local _ = string.format
-local id_ctype = ffi.typeof'id'
+local id_ct = ffi.typeof'id'
 
 local function ptr(p) --convert NULL pointer to nil for easier handling (say 'not ptr' instead of 'ptr == nil')
 	if p == nil then return nil end
 	return p
 end
 
-local intptr_ctype = ffi.typeof'intptr_t'
+local intptr_ct = ffi.typeof'intptr_t'
 
 local function nptr(p) --convert pointer to lua number for using as table key
 	if p == nil then return nil end
-	local np = ffi.cast(intptr_ctype, p)
+	local np = ffi.cast(intptr_ct, p)
 	local n = tonumber(np)
-	assert(ffi.cast(intptr_ctype, n) == np) --check that we don't get pointers in the upper 13 bits on 64bit
+	assert(ffi.cast(intptr_ct, n) == np) --check that we don't get pointers in the upper 13 bits on 64bit
 	return n
 end
 
@@ -251,17 +251,17 @@ end
 
 --type encodings: parsing and conversion to C types ----------------------------------------------------------------------
 
--- stype: a value type encoding: 'B', '^[8i]', '{CGPoint="x"d"y"d}'; converts to a ctype.
--- mtype: a method type encoding: 'v12@0:4c8' or just 'v@:c'; converts to a ftype.
--- ftype: a function/method type encoding in table form: {retval='v', '@', ':', 'c'}. converts to a ctype.
--- ctype: a C type encoding for a stype or a ftype: 'BOOL', 'void (*) (SEL, Class, char)'.
+-- stype: a value type encoding, eg. 'B', '^[8i]', '{CGPoint="x"d"y"d}'; converts to a ctype.
+-- mtype: a method type encoding, eg. 'v12@0:4c8' or just 'v@:c'; converts to a ftype.
+-- ftype: a function/method type encoding in table form, eg. {retval='v', '@', ':', 'c'}. converts to a ctype.
+-- ctype: a C type encoding for a stype, eg. 'B' -> 'BOOL', or for a ftype, eg. 'v:#c' -> 'void (*) (SEL, Class, char)'.
+-- ct:    a ffi C type object for a ctype string, eg. ffi.typeof('void (*) (id, SEL)') -> ct.
 
 --ftype spec:
---		variadic = true|nil                        --vararg function
---		isblock = true|nil                         --block or function (only for function pointers)
---		fp = {retval = ftype, [argindex] = ftype}  --table of function pointer args or retvals
---		retval = stype                             --return stype
---		[argindex] = stype                         --arg stype
+--		variadic = true|nil         --vararg function
+--		isblock = true|nil          --block or function (only for function pointers)
+--		[argindex] = stype          --arg stype (argindex is 1,2,... or 'retval')
+--		fp = {[argindex] = ftype}   --function pointer args
 
 local function optname(name) --format an optional name: if not nil, return it with a space in front
 	return name and ' '..name or ''
@@ -409,12 +409,13 @@ end
 --note: other type annotations like `variadic` and `isblock` come from bridgesupport attributes.
 local function mtype_ftype(mtype) --eg. 'v12@0:4c8' (retval offset arg1 offset arg2 offset ...)
 	local ftype = {}
+	local retval
 	local function addarg(annotations, s)
 		if annotations:find'r' then
 			s = 'r' .. s
 		end
-		if not ftype.retval then
-			ftype.retval = s
+		if not retval then
+			retval = s
 		else
 			table.insert(ftype, s)
 		end
@@ -430,7 +431,10 @@ local function mtype_ftype(mtype) --eg. 'v12@0:4c8' (retval offset arg1 offset a
 		if n == 0 then s,n = s:gsub('^([rnNoORV]*)([%^]*[cislqCISLQfdDBv%?@#%:%*])%d*', addarg) end --try <primitive>offset
 		assert(n > 0, mtype)
 	end
-	return ftype --{retval = stype, [argindex] = stype, ...}
+	if retval ~= 'v' then
+		ftype.retval = retval
+	end
+	return ftype
 end
 
 --format a table representation of a method or function (ftype) to its C type or, if name given, its C declaration.
@@ -445,7 +449,7 @@ local function ftype_ctype(ftype, name, for_callback)
 				lastarg = i - 1
 			end
 		end
-		--they also don't can't return structs directly.
+		--they also can't return structs directly.
 		if retval and retval:find'^[%{%(]' then
 			retval = nil
 		end
@@ -468,8 +472,10 @@ local function ftype_mtype(ftype) --convert ftype to type encoding
 	return (ftype.retval or 'v') .. table.concat(ftype)
 end
 
-local ffi_ctype = memoize(function(ctype) --cache function pointer types because we can only make 64k of them
-	return ffi.typeof(ctype)
+local ctype_ct = memoize(function(ctype) --cache function pointer ct objects because we can only make 64k of them
+	local ok,ct = pcall(ffi.typeof, ctype)
+	check(ok, 'ctype error for "%s": %s', ctype, ct)
+	return ct
 end)
 
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
@@ -556,6 +562,7 @@ local function fp_arg(argtag, attrs, getwhile)
 
 	local argtype = attrs[typekey] or attrs.type
 	local fp = {isblock = argtype == '@?' or nil}
+	if fp.isblock then fp[1] = '^v' end --adjust type: first arg should be the block object
 
 	for tag, attrs in getwhile(argtag) do
 		if tag == 'arg' or tag == 'retval' then
@@ -566,7 +573,9 @@ local function fp_arg(argtag, attrs, getwhile)
 					fp = nil
 				else
 					local argindex = tag == 'retval' and 'retval' or #fp + 1
-					fp[argindex] = argtype
+					if not (argindex == 'retval' and argtype == 'v') then
+						fp[argindex] = argtype
+					end
 				end
 			end
 
@@ -633,7 +642,9 @@ tag['function'] = function(attrs, getwhile)
 				ftype = nil
 			else
 				local argindex = tag == 'retval' and 'retval' or #ftype + 1
-				ftype[argindex] = argtype
+				if not (argindex == 'retval' and argtype == 'v') then
+					ftype[argindex] = argtype
+				end
 
 				local fp = fp_arg(tag, attrs, getwhile)
 				if fp then
@@ -1180,12 +1191,12 @@ end
 local add_class_protocol --fw. decl.
 
 local function isobj(x)
-	return ffi.istype(id_ctype, x)
+	return ffi.istype(id_ct, x)
 end
 
-local class_ctype = ffi.typeof'Class'
+local class_ct = ffi.typeof'Class'
 local function isclass(x)
-	return ffi.istype(class_ctype, x)
+	return ffi.istype(class_ct, x)
 end
 
 local function ismetaclass(cls)
@@ -1391,7 +1402,7 @@ local function add_class_method(cls, sel, func, ftype)
 	end
 	func = callback_caller(ftype, func)         --wrapper that converts args and return values.
 	local ctype = ftype_ctype(ftype, nil, true) --special callback ctype stripped of pass-by-val structs.
-	local callback = ffi.cast(ffi_ctype(ctype), func) --note: pins func; also, it will never be released.
+	local callback = ffi.cast(ctype_ct(ctype), func) --note: pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	if logtopics.addmethod then
@@ -1431,31 +1442,31 @@ local function ivar_ctype(ivar) --NOTE: bitfield ivars not supported (need ivar 
 	return ivar_stype_ctype(ivar_stype(ivar))
 end
 
-local ivar_stype_ffi_ctype = memoize(function(stype) --cache to avoid re-parsing and ctype creation
+local ivar_stype_ct = memoize(function(stype) --cache to avoid re-parsing and ctype creation
 	return ffi.typeof(ivar_stype_ctype(stype))
 end)
 
-local function ivar_ffi_ctype(ivar)
-	return ivar_stype_ffi_ctype(ivar_stype(ivar))
+local function ivar_ct(ivar)
+	return ivar_stype_ct(ivar_stype(ivar))
 end
 
-local byteptr_ctype = ffi.typeof'uint8_t*'
+local byteptr_ct = ffi.typeof'uint8_t*'
 
 local function ivar_get_value(obj, name, ivar)
-	return ffi.cast(ivar_ffi_ctype(ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0]
+	return ffi.cast(ivar_ct(ivar), ffi.cast(byteptr_ct, obj) + ivar_offset(ivar))[0]
 end
 
 local function ivar_set_value(obj, name, ivar, val)
-	ffi.cast(ivar_ffi_ctype(ivar), ffi.cast(byteptr_ctype, obj) + ivar_offset(ivar))[0] = val
+	ffi.cast(ivar_ct(ivar), ffi.cast(byteptr_ct, obj) + ivar_offset(ivar))[0] = val
 end
 
 ffi.metatype('struct objc_ivar', {
 	__tostring = ivar_name,
 	__index = {
-		name = ivar_name,
-		stype = ivar_stype,
-		ctype = ivar_ctype,
-		ffi_ctype = ivar_ffi_ctype,
+		name   = ivar_name,
+		stype  = ivar_stype,
+		ctype  = ivar_ctype,
+		ct     = ivar_ct,
 		offset = ivar_offset,
 	},
 })
@@ -1518,8 +1529,16 @@ local function annotate_ftype(ftype, mta)
 	return ftype
 end
 
-local function annotate_method_ftype(cls, sel, ftype)
-	return annotate_ftype(ftype, get_mta(cls, sel))
+local function method_arg_ftype(cls, selname, argindex) --for constructing blocks to pass to methods.
+	check(argindex, 'argindex expected')
+	local sel, method = find_method(cls, selname)
+	if not sel then return end
+	local ftype = annotate_ftype(method_ftype(method), get_mta(cls, sel))
+	return ftype.fp and ftype.fp[argindex + 2]
+end
+
+local function function_arg_ftype(funcname, argindex)
+	--TODO
 end
 
 --class/instance method caller based on loose selector names.
@@ -1556,8 +1575,8 @@ noretain = {release=1, autorelease=1, retain=1, alloc=1, new=1, copy=1, mutableC
 local fctype_cache_ = memoize(function(mtype)
 	local ftype = mtype_ftype(mtype)
 	local ctype = ftype_ctype(ftype)
-	local ctype = ffi_ctype(ctype)
-	return {ftype, ctype}
+	local ct    = ctype_ct(ctype)
+	return {ftype, ct}
 end)
 local function fctype_cache(mtype)
 	return unpack(fctype_cache_(mtype))
@@ -1570,17 +1589,16 @@ local method_caller = memoize2(function(cls, selname)
 
 	local mtype = method_mtype(method)
 	local mta = get_mta(cls, sel)
-	local ftype, ctype
+	local ftype, ct
 	if not mta then --unnanotated types can save us type parsing, formatting and ftype creation
-		ftype, ctype = fctype_cache(mtype)
+		ftype, ct = fctype_cache(mtype)
 	else
 		ftype = mtype_ftype(mtype)
 		ftype = annotate_ftype(ftype, mta)
-		ctype = ftype_ctype(ftype)
-		ctype = ffi_ctype(ctype)
+		ct    = ctype_ct(ftype_ctype(ftype))
 	end
 	local func = method_implementation(method)
-	local func = ffi.cast(ctype, func)
+	local func = ffi.cast(ct, func)
 	local func = function_caller(ftype, func)
 
 	local can_retain = not noretain[selname]
@@ -1620,7 +1638,7 @@ local function override(cls, selname, func, ftype) --returns true if a method wa
 	if sel then
 		if not ftype then
 			ftype = method_ftype(method)
-			ftype = annotate_method_ftype(cls, sel, ftype)
+			ftype = annotate_ftype(ftype, get_mta(cls, sel))
 		end
 		add_class_method(cls, sel, func, ftype)
 		return true
@@ -1826,10 +1844,10 @@ struct block_literal *_NSConcreteGlobalBlock;
 struct block_literal *_NSConcreteStackBlock;
 ]]
 
-local voidptr_ctype        = ffi.typeof'void*'
-local block_ctype          = ffi.typeof'struct block_literal'
-local copy_helper_ctype    = ffi.typeof'copy_helper_t'
-local dispose_helper_ctype = ffi.typeof'dispose_helper_t'
+local voidptr_ct        = ffi.typeof'void*'
+local block_ct          = ffi.typeof'struct block_literal'
+local copy_helper_ct    = ffi.typeof'copy_helper_t'
+local dispose_helper_ct = ffi.typeof'dispose_helper_t'
 
 --create a block and return it typecast to 'id'.
 --note: the automatic memory management part adds an overhead of 2 closures + 2 ffi callback objects.
@@ -1843,13 +1861,15 @@ local function block(func, ftype)
 	if type(ftype) == 'string' then
 		ftype = mtype_ftype(ftype)
 	end
-	table.insert(ftype, 1, '^v') --adjust ftype: first arg. is the block object
+	if not ftype.isblock then --not given a block ftype, adjust it
+		table.insert(ftype, 1, '^v') --first arg. is the block object
+	end
 	local ctype = ftype_ctype(ftype, nil, true)
 
 	local function caller(block, ...) --wrapper to remove the first arg
 		return func(...)
 	end
-	local callback = ffi.cast(ffi_ctype(ctype), caller)
+	local callback = ffi.cast(ctype_ct(ctype), caller)
 
 	local refcount = 1
 
@@ -1875,22 +1895,22 @@ local function block(func, ftype)
 		assert(refcount >= 0)
 	end
 
-	copy_callback = ffi.cast(copy_helper_ctype, copy)
-	dispose_callback = ffi.cast(dispose_helper_ctype, dispose)
+	copy_callback = ffi.cast(copy_helper_ct, copy)
+	dispose_callback = ffi.cast(dispose_helper_ct, dispose)
 
-	block = block_ctype()
+	block = block_ct()
 
 	block.isa        = C._NSConcreteStackBlock --stack block because global blocks are not copied/disposed
 	block.flags      = bit.lshift(1, 25) --has copy & dispose helpers
 	block.reserved   = 0
-	block.invoke     = ffi.cast(voidptr_ctype, callback) --callback is pinned by dispose()
+	block.invoke     = ffi.cast(voidptr_ct, callback) --callback is pinned by dispose()
 	block.descriptor = block.d
 	block.d.reserved = 0
-	block.d.size     = ffi.sizeof(block_ctype)
+	block.d.size     = ffi.sizeof(block_ct)
 	block.d.copy_helper    = copy_callback
 	block.d.dispose_helper = dispose_callback
 
-	local block_object = ffi.cast(id_ctype, block) --block remains pinned by dispose()
+	local block_object = ffi.cast(id_ct, block) --block remains pinned by dispose()
 	ffi.gc(block_object, dispose)
 
 	log('block', 'create\trefcount: %-8d', refcount)
@@ -1919,7 +1939,7 @@ function toobj(v) --convert a lua value to an objc object representing that valu
 			 return arr
 		end
 	elseif isclass(v) then
-		return ffi.cast(id_ctype, v) --TODO: find a better way to convert arg#1 for class methods
+		return ffi.cast(id_ct, v) --needed to convert arg#1 for class methods
 	else
 		return v --pass through
 	end
@@ -1959,11 +1979,12 @@ local function convert_fp_arg(fp, arg)
 		return block(arg, fp)
 	else
 		local ctype = ftype_ctype(fp, nil, true)
-		return ffi.cast(ffi_ctype(ctype), arg) --note: this callback will never be released.
+		return ffi.cast(ctype_ct(ctype), arg) --note: this callback will never be released.
 	end
 end
 
-function function_caller(ftype, func) --wrap a function for automatic type conversion of its args and return value.
+--wrap a function for automatic type conversion of its args and return value.
+function function_caller(ftype, func)
 
 	local function convert_arg(i, arg)
 		local argtype = ftype[i]
@@ -1980,8 +2001,8 @@ function function_caller(ftype, func) --wrap a function for automatic type conve
 		end
 	end
 
-	local function convert_args(i, ...)
-		if select('#', ...) == 0 then return end
+	local function convert_args(i, ...) --not a tailcall but at least it doesn't make any garbage
+		if select('#', ...) == 0 then return end --is this compiled?
 		return convert_arg(i, ...), convert_args(i + 1, select(2, ...))
 	end
 
@@ -2033,6 +2054,7 @@ objc.searchpaths = searchpaths
 objc.stype_ctype = stype_ctype
 objc.mtype_ftype = mtype_ftype
 objc.ftype_ctype = ftype_ctype
+objc.ctype_ct    = ctype_ct
 
 --runtime/get
 objc.SEL = selector
@@ -2055,6 +2077,7 @@ objc.method = class_method
 objc.ivars = class_ivars
 objc.ivar = class_ivar
 objc.conform = add_class_protocol
+objc.argtype = method_arg_ftype
 
 --runtime/add
 objc.override = override
@@ -2093,9 +2116,11 @@ setmetatable(objc, {
 if not ... then
 	for k,v in pairs(objc) do
 		print(_('%-10s %s', type(v), 'objc.'..k))
-	end
-	for k,v in pairs(P) do
-		print(_('%-10s %s', type(v), 'objc.debug.'..k))
+		if k == 'debug' then
+			for k,v in pairs(P) do
+				print(_('%-10s %s', type(v), 'objc.debug.'..k))
+			end
+		end
 	end
 end
 
