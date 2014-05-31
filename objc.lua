@@ -359,7 +359,7 @@ local function primitive_ctype(ctype)
 	end
 end
 
-function const_ctype(s, ...)
+local function const_ctype(s, ...)
 	return 'const ' .. stype_ctype(s:sub(2), ...)
 end
 
@@ -471,7 +471,7 @@ local function ftype_mtype(ftype) --convert ftype to method type encoding
 	return (ftype.retval or 'v') .. table.concat(ftype)
 end
 
-local static_mtype_ftype = memoize(function(mtype) --ftype cache for unnanotated method types
+local static_mtype_ftype = memoize(function(mtype) --ftype cache for non-anotated method types
 	return mtype_ftype(mtype)
 end)
 
@@ -849,7 +849,7 @@ end
 
 loadtypes = true --load bridgesupport files
 
-searchpaths = {
+local searchpaths = {
 	'/System/Library/Frameworks',
 	'/Library/Frameworks',
 	'~/Library/Frameworks',
@@ -1033,7 +1033,7 @@ end
 
 infprot_meta.__tostring = infprot.name
 
-function noop() return end
+local function noop() return end
 
 function infprot:protocols()
 	return noop --not in bridgesupport
@@ -1930,7 +1930,7 @@ end
 
 --lua type conversions ---------------------------------------------------------------------------------------------------
 
-function toobj(v) --convert a lua value to an objc object representing that value
+local function toobj(v) --convert a lua value to an objc object representing that value
 	if type(v) == 'number' then
 		return objc.NSNumber:numberWithDouble(v)
 	elseif type(v) == 'string' then
@@ -2095,6 +2095,7 @@ objc.mtype_ftype = mtype_ftype
 objc.ftype_ctype = ftype_ctype
 objc.ctype_ct    = ctype_ct
 objc.ftype_ct    = ftype_ct
+objc.method_ftype = method_ftype
 
 --runtime/get
 objc.SEL = selector

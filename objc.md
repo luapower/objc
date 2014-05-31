@@ -6,9 +6,51 @@ tagline:   Objective-C bridge
 
 ## `local objc = require'objc'`
 
-Objecive-C runtime and BridgeSupport binding.
+Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](#main-api) |
+	[Reflection API](#reflection-api) | [Debug API](#debug-api)
 
-## Quick Tour
+
+## Features
+
+  * Coverage
+    * full access to Cocoa classes, protocols, C functions, structs, enums, constants
+	 * access to methods, properties and ivars
+	 * creating classes and overriding methods
+	 * exploring and searching the Objective-C runtime
+  * Platforms
+    * tested with __OSX 10.9__ on __32bit__ and __64bit__
+  * Dependencies
+    * none for Cocoa (XML parser included), [expat] for non-standard bridgesupport files
+  * Type Bridging
+    * methods and functions return Lua booleans
+    * Lua numbers, strings and tables can be passed for NSNumber, NSStrings, NSArray and NSDictionary args
+	 * string names can be passed for class and selector args
+	 * Lua functions can be passed for block and function-pointer args
+      * their type signature is inferred from the calling context
+    * overriding methods does not require specifying method type signatures
+      * method signatures are inferred from existing supermethods and conforming protocols
+         * formal and informal protocols supported
+  * GC Bridging
+    * attaching Lua variables to classes and objects
+      * Lua variables follow the lifetime of Obj-C objects
+    * automatic memory management of objects and blocks
+      * blocks are refcounted and freed when their last owner releases them
+  * Speed
+    * aggressive caching all-around
+	 * no gc pressure in calling methods after the first invocation
+	 * fast, small embedded XML parser
+
+
+## Limitations
+
+  * blocks, function callbacks and overriden methods are based on luajit ffi callbacks
+  which have some limitations:
+    * can't access the vararg part of the function, for variadic functions/methods
+    * can't access the pass-by-value struct args or any arg after the first pass-by-value struct arg
+	 * can't return structs by value
+
+
+## Quick Tutorial
 
 ### Loading Frameworks
 
@@ -59,7 +101,7 @@ end
 objc.NSObject.myClassVar = 'I can live forever'
 local obj = objc.NSObject:new()
 obj.myInstanceVar = 'I live while obj lives'
-obj.myClassVar = 42 --change the class var (same value for all objects)
+obj.myClassVar = 5 --change the class var (same value for all objects)
 ~~~
 
 ### Accessing Properties & IVars
@@ -106,9 +148,28 @@ end, 'v@^B'}) --retval is 'v' (void), line is '@' (object), stop is '^B' (pointe
 str:enumerateLinesUsingBlock(block)
 ~~~
 
-## API Refrence
+## More goodies
+
+Check out the unit test script, it also contains a few demos, not just tests.
+
+Check out the undocumented `objc_inspect` module, it has a simple cmdline inspection API.
+
+Look up anything in Cocoa by a Lua pattern:
+
+		./luajit objc_test.lua inspect_find foo
+
+Then inspect it:
+
+		./luajit objc_test.lua inspect_class PAFootprint
+
+## Main API
 
 ----------------------------------------------------------- --------------------------------------------------------------
+__global objects__
+
+`objc`																		namespace for loaded classes, C functions,
+																				function aliases, enums, constants, and this API
+
 __frameworks__
 
 `objc.load(name|path[, option])`										load a framework given its name or its full path \
@@ -116,21 +177,101 @@ __frameworks__
 
 `objc.searchpaths = {path1, ...}`									search paths for frameworks
 
-__selectors__
-
-`objc.SEL(s|sel) -> sel`												create/find a selector by name
-
-`sel:name() -> s`															selector's name (same as tostring(sel))
-
 __classes__
 
-`objc.class'NSString' -> cls`											class by name (same as objc.NSString)
+`objc.class'name' -> cls`												class by name (`objc.class'Foo'` == `objc.Foo`)
 
 `objc.class(obj) -> cls`												class of instance
 
-`objc.class('Foo', 'SuperFoo <Protocol1, ...>') -> cls`		create a class
+`objc.class('Foo', 'SuperFoo <Protocol1, ...>') -> cls`		create a class which conforms to protocols
 
 `objc.class('Foo', 'SuperFoo', 'Protocol1', ...) -> cls`		create a class (alternative way)
+
+`objc.classname(cls) -> s`												class name
+
+`objc.isclass(x) -> true|false`										check for Class type
+
+`objc.isobj(x) -> true|false`											check for id type
+
+`objc.ismetaclass(cls) -> true|false`								check if the class is a metaclass
+
+`objc.superclass(cls|obj) -> cls|nil`								superclass
+
+`objc.metaclass(cls|obj) -> cls`										metaclass
+
+`objc.isa(cls|obj, supercls) -> true|false`						check the inheritance chain
+
+`objc.conforms(cls|obj, protocol) -> true|false`				check if a class conforms to a protocol
+
+`objc.responds(cls, sel) -> true|false`							check if instances of cls responds to a selector
+
+`objc.conform(cls, protocol) -> true|false`						declare that a class conforms to a protocol
+
+__object fields__
+
+`objc[field] -> x` \														access an instance field, i.e. try to get, in order: \
+																					- an instance luavar \
+																					- a readable instance property \
+																					- an ivar \
+																					- an instance method \
+																					- a class field (see below)
+
+`obj[name] = x`															set an instance field, i.e. try to set, in order: \
+																					- an existing instance luavar \
+																					- a writable instance property \
+																					- an ivar \
+																					- an existing class field (see below) \
+																					- a new instance luavar
+
+__class fields__
+
+`cls[name] -> x`															access a class field, i.e. try to get, in order: \
+																					- a class luavar \
+																					- a readable class property \
+																					- a class method
+
+`cls[name] = x`															set a class field, i.e. try to set, in order: \
+																					- an existing class luavar \
+																					- a writable class property \
+																					- an instance method \
+																					- a conforming instance method \
+																					- a class method \
+																					- a conforming class method \
+																					- a new class luavar
+
+__type conversions__
+
+`objc.tolua(x) -> luatype`												convert a NSNumber, NSString, NSDictionary, NSArray
+																				to a Lua number, string, table respectively.
+																				anything else passes through.
+
+`objc.toobj(x) -> objtype`												convert a Lua number, string, or table to a
+																				NSNumber, NSString, NSDictionary, NSArray respectively.
+																				anything else passes through.
+
+__overriding__
+
+`objc.override(cls, sel, func[,mtype|ftype]) -> true|false`	override an existing method, or add a method
+																				which conforms to one of the conforming protocols.
+																				returns true if the method was found and overriden.
+
+`objc.callsuper(obj, sel, args...) -> retval`					call the method implementation of the superclass
+																				of an object.
+
+__selectors__
+
+`objc.SEL(name|sel) -> sel`											create/find a selector by name
+
+`sel:name() -> s`															selector name (same as tostring(sel))
+
+
+__blocks and callbacks__
+
+`objc.toarg(cls, sel, argindex, x) -> objtype`					convert a Lua value to an objc value - used specifically
+																				to create blocks and function callbacks with an appropriate
+																				type signature for a specific method argument.
+
+`objc.block(func, mtype|ftype) -> block`							create a block with a specific type encoding.
 
 ----------------------------------------------------------- --------------------------------------------------------------
 
@@ -139,58 +280,157 @@ __classes__
 
 ----------------------------------------------------------- --------------------------------------------------------------
 __protocols__
-`objc.protocols() -> clist<proto>`									list all loaded protocols
-`objc.protocol(name|proto) -> proto`								get a protocol by name
-`proto:name() -> s`														protocol name
-`proto:protocols() -> clist<proto>`									inherited protocols
-`proto:properties() -> clist<prop>`									get properties (inherited ones not included)
+
+`objc.protocols() -> iter() -> proto`								loaded protocols (formal or informal)
+
+`objc.protocol(name|proto) -> proto`								get a protocol by name (formal or informal)
+
+`proto:name() -> s`														protocol name (same as tostring(proto))
+
+`proto:protocols() -> iter() -> proto`								inherited protocols
+
+`proto:properties() -> iter() -> prop`								get properties (inherited ones not included)
+
 `proto:property(proto, name, required, readonly) -> prop`	find a property
-`proto:method_types(proto, inst, req) -> {name=types}`		get methods and their types
-`proto:method_type(proto, sel, inst, req) -> {name=types}`	find a method
-`proto:search(f, ...) -> ret`											call f(proto, ...) for proto and all superprotocols recursively. stops when f() returns something and returns that value.
+
+`proto:methods(proto, inst, req) -> iter() -> sel, mtype`	get method names and raw, non-annotated type encodings
+
+`proto:mtype(proto, sel, inst, req) -> mtype`					find a method and return its raw type encoding
+
+`proto:ctype(proto, sel, inst, req[, for_cb]) -> ctype`		find a method and return its C type encoding
+
 __classes__
-`objc.classes() -> clist<cls>`										list all loaded classes
+
+`objc.classes() -> iter() -> cls`									loaded classes
+
+`objc.protocols(cls) -> iter() -> proto`							protocols which a class conforms to (formal or informal)
+
+objc.properties(cls) -> iter() -> prop`							instance properties \
+																				use metaclass(cls) to get class properties
+
+`objc.property(cls, name) -> prop`									instance property by name (looks in superclasses too)
+
+`objc.methods(cls) -> iter() -> meth`								instance methods \
+																				use metaclass(cls) to get class methods
+
+`objc.method(cls, name) -> meth`										instance method by name (looks in superclasses too)
+
+`objc.ivars(cls) -> iter() -> ivar`									ivars
+
+`objc.ivar(cls) -> ivar`												ivar by name (looks in superclasses too)
+
 __properties__
-`prop:name()`
-`prop:getter() -> s`
-`prop:setter() -> s`
+
+`prop:name() -> s`														property name (same as tostring(prop))
+
+`prop:getter() -> s`														getter name
+
+`prop:setter() -> s`														setter name (if not readonly)
+
+`prop:stype() -> s`														type encoding
+
+`prop:ctype() -> s`														C type encoding
+
+`prop:readonly() -> true|false`										readonly check
+
+`prop:ivar() -> s`														ivar name
+
+__methods__
+
+`meth:selector() -> sel`												selector
+
+`meth:name() -> s`														selector name (same as tostring(meth))
+
+`meth:mtype() -> s`														type encoding
+
+`meth:implementation() -> IMP`										implementation (untyped)
+
+__ivars__
+
+`ivar:name() -> s`														name (same as tostring(ivar))
+
+`ivar:stype() -> s`														type encoding
+
+`ivar:ctype() -> s`														C type encoding
+
+`ivar:offset() -> n`														offset
+
 ----------------------------------------------------------- --------------------------------------------------------------
 
 
-## Debugging and Fine Tuning
+## Debug API
 
 ----------------------------------------------------------- --------------------------------------------------------------
 __logging__
-objc.debug.errors (true)												log errors to stderr
-objc.debug.methodtypes (false)										log method ctype parsing
-objc.debug.release (false)												log relases with refcount
-objc.debug.retain (false)												log retains with refcount
-objc.debug.load (false)													log loaded frameworks
-objc.debug.cdefs (false)												print cdefs to stdout (then you can grab them and make your own static cdef headers)
-__stats__
-objc.debug.stats.errors										         number of cdef errors
-objc.debug.stats.cdefs													number of cdefs without error
-objc.debug.stats.redef													number of incompatible redefines (if objc.debug.redef == true)
-__ctype renaming__
-objc.debug.rename.string.foo = bar									load a string constant under a different name
-objc.debug.rename.enum.foo = bar										load an enum under a different name
-objc.debug.rename.typedef.foo = bar									load a type under a different name
-objc.debug.rename.const.foo = bar									load a const under a different name
-objc.debug.rename.function.foo = bar								load a global function under a different name
-__bridgesupport options__
-objc.debug.loaddeps (false)											load dependencies per bridgesupport file (usually too many to be useful)
-objc.debug.lazyfuncs (true)											cdef functions on the first call
-objc.debug.redef (false)												check incompatible redefinition attempts (makes parsing slower)
-__framework loading fine tuning__
-objc.debug.loadtypes (true)											load bridgesupport files
-`objc.find_framework(name|path) -> path, name`					find a framework in `objc.searchpaths`
-`objc.load_bridgesupport(path, loaddeps)`							load a bridgesupport file
-`objc.debug.loaded -> {name = true}`								loaded frameworks
-`objc.debug.loaded_bs -> {name = true}`							frameworks for which bridgesupport was loaded too
+`objc.debug.errors` (true)												log errors to stderr
+`objc.debug.printcdecl` (false)										print C declarations on stdout
+`objc.debug.logtopics= {topic = true}` (empty)					enable logging on some topic (see source code)
+`objc.debug.errcount = {topic = count}`							error counts
+__solving C name clashes__
+`objc.debug.rename.string.foo = bar`								load a string constant under a different name
+`objc.debug.rename.enum.foo = bar`									load an enum under a different name
+`objc.debug.rename.typedef.foo = bar`								load a type under a different name
+`objc.debug.rename.const.foo = bar`									load a const under a different name
+`objc.debug.rename.function.foo = bar`								load a global function under a different name
+__loading frameworks__
+`objc.debug.loadtypes` (true)											load bridgesupport files
+`objc.debug.loaddeps` (false)											load dependencies per bridgesupport file (too many to be useful)
+`objc.debug.lazyfuncs` (true)											cdef functions on the first call instead of on load
+`objc.debug.checkredef` (false)										check incompatible redefinition attempts (makes parsing slower)
+`objc.debug.usexpat` (false)											use expat to parse bridgesupport files
+__gc bridging__
+`objc.debug.noretain.foo = true`										declare that method `foo` already retains the object it returns
 ----------------------------------------------------------- --------------------------------------------------------------
 
-## Quick Tutorial
+## Credits
 
-...
+  * Cosmin Apreutesei, May 2014, public domain.
+  * Ideas and code from [TLC](https://github.com/fjolnir/TLC) by Fjölnir Ásgeirsson (c) 2012, MIT license.
 
+## Future developments
 
+> NOTE: I don't plan to work on these, except on requests with a use case. Patches/pull requests welcome.
+
+### Bridging
+
+  * toarg() for functions
+  * fp args on fp args (recorded but not used - need use cases)
+  * auto-coercion of types for functions/methods with format strings, eg. NSLog
+    * record `printf_format` tag
+    * format string parser
+  * return pass-by-reference out parameters as multiple Lua return values
+    * record type modifiers O=out, N=inout
+  * auto-allocation of out arrays using array type annotations
+    * `c_array_length_in_result` - array length is the return value
+    * `c_array_length_in_arg` - array length is an arg
+    * `c_array_delimited_by_null` - vararg ends in null - doesn't luajit do that already?
+    * `c_array_of_variable_length` - ???
+    * `c_array_of_fixed_length` - specifies array size? doesn't seem so
+  * `sel_of_type`, `sel_of_type64` - use cases?
+  * core foundation stuff
+    * `cftypes` xml node - use cases?
+    * `already_retained` flag
+  * operator overloading (need good use cases)
+
+### Inspection
+
+  * list all frameworks in searchpaths
+  * find framework in searchpaths
+  * report conforming methods, where they come from and mark the required ones, especially required but not implemented
+  * inspection of instances
+    * print class, superclasses and protocols in one line
+    * print values of luavars, ivars, properties
+    * listing sections: ivars, properties, methods, with origin class/protocol for each
+
+### Type Cache
+
+The idea is to cache bridgesupport data into Lua files for faster loading of frameworks.
+
+  * one Lua cache file for each framework to be loaded with standard 'require'
+    * dependencies also loaded using standard 'require'
+  * save dependency loading
+  * save cdecls - there's already a pretty printer and infrastructure for recording those
+  * save constants and enums
+  * save function wrappers
+  * save mtas (find a more compact format for annotations containing only {retval='B'} ?)
+  * save informal protocols

@@ -125,7 +125,8 @@ function inspect.class_methods(cls, inst)
 	if not_(cls, objc.classes, inspect.class_methods, inst) then return end
 	cls = inst and objc.class(cls) or objc.metaclass(cls)
 	for meth in isort(objc.methods(cls), 'name') do
-		p('%-40s %-50s %-50s %s', objc.classname(cls), meth:name(), meth:ctype(), meth:type())
+		p('%-40s %-50s %-50s %s', objc.classname(cls), meth:name(),
+				objc.ftype_ctype(objc.method_ftype(cls, meth:selector(), meth)), meth:mtype())
 	end
 end
 
@@ -133,7 +134,7 @@ function inspect.protocol_methods(proto, inst, required)
 	if not_(proto, objc.protocols, inspect.protocol_methods, inst, required) then return end
 	proto = objc.protocol(proto)
 	for selname, mtype in proto:methods(inst or false, required or false) do
-		p('%-40s %-50s %-50s %s', proto:name(), selname, objc.method_ctype(mtype), mtype)
+		p('%-40s %-50s %-50s %s', proto:name(), selname, objc.ftype_ctype(objc.mtype_ftype(mtype)), mtype)
 	end
 end
 
@@ -143,7 +144,8 @@ function inspect.class_ivars(cls)
 	if not_(cls, objc.classes, inspect.ivars) then return end
 	cls = objc.class(cls)
 	for ivar in isort(objc.ivars(cls), 'name') do
-		p('%-40s %-50s %-50s %-5s %s', objc.classname(cls), ivar:name(), ivar:ctype(), ivar:offset(), ivar:type())
+		p('%-40s %-50s %-50s %-5s %s', objc.classname(cls), ivar:name(), ivar:ctype(),
+												tonumber(ivar:offset()), ivar:stype())
 	end
 end
 

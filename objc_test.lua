@@ -630,12 +630,116 @@ end
 -- inspection ------------------------------------------------------------------------------------------------------------
 
 local function load_many_frameworks()
-	objc.load'System'
-	objc.load'Carbon'
-	objc.load'AppKit'
-	objc.load'IOKit'
-	objc.load'AVFoundation'
-	objc.load'WebKit'
+	objc.debug.loaddeps = true
+	for s in string.gmatch([[
+AGL
+AVFoundation
+AVKit
+Accelerate
+Accounts
+AddressBook
+AppKit
+AppKitScripting
+AppleScriptKit
+AppleScriptObjC
+AppleShareClientCore
+ApplicationServices
+AudioToolbox
+AudioUnit
+AudioVideoBridging
+Automator
+CFNetwork
+CalendarStore
+Carbon
+Cocoa
+Collaboration
+CoreAudio
+CoreAudioKit
+CoreData
+CoreFoundation
+CoreGraphics
+CoreLocation
+CoreMIDI
+CoreMedia
+CoreMediaIO
+CoreServices
+CoreText
+CoreVideo
+CoreWLAN
+DVComponentGlue
+DVDPlayback
+DirectoryService
+DiscRecording
+DiscRecordingUI
+DiskArbitration
+DrawSprocket
+EventKit
+ExceptionHandling
+FWAUserLib
+ForceFeedback
+Foundation
+GLKit
+GLUT
+GSS
+GameController
+GameKit
+ICADevices
+IMServicePlugIn
+IOBluetooth
+IOBluetoothUI
+IOKit
+IOSurface
+ImageCaptureCore
+ImageIO
+InputMethodKit
+InstallerPlugins
+InstantMessage
+JavaFrameEmbedding
+JavaScriptCore
+Kerberos
+LDAP
+LatentSemanticMapping
+MapKit
+MediaAccessibility
+MediaLibrary
+MediaToolbox
+NetFS
+OSAKit
+OpenAL
+OpenCL
+OpenDirectory
+OpenGL
+PCSC
+PreferencePanes
+PubSub
+QTKit
+Quartz
+QuartzCore
+QuickLook
+SceneKit
+ScreenSaver
+Scripting
+ScriptingBridge
+Security
+SecurityFoundation
+SecurityInterface
+ServiceManagement
+Social
+SpriteKit
+StoreKit
+SyncServices
+System
+SystemConfiguration
+TWAIN
+Tcl
+Tk
+VideoDecodeAcceleration
+VideoToolbox
+WebKit
+]], '([^\n\r]+)') do
+		objc.load(s)
+	end
+	objc.debug.loaddeps = false
 end
 
 function eyetest.inspect_classes()
@@ -688,7 +792,7 @@ function eyetest.inspect_protocol(proto)
 end
 
 function eyetest.inspect_find(patt)
-	load_many_frameworks()
+	load_all_cocoa()
 	inspect.find(patt)
 end
 
