@@ -409,12 +409,12 @@ function test.blocks()
 
 	--take 2: creating a single block in the outer loop (we must give its type).
 	local t
-	local blk = block(function(line, pstop)
+	local blk = toarg(NSString, 'enumerateLinesUsingBlock', 1, function(line, pstop)
 			t[#t+1] = line:UTF8String()
 			if #t == 2 then --stop at line 2
 				pstop[0] = 1
 			end
-	end, argtype(NSString, 'enumerateLinesUsingBlock', 1)) --{'@','^B'}
+	end)
 	local s = NSString:alloc():initWithUTF8String'line1\nline2\nline3'
 	for i=1,times do
 		t = {}
@@ -616,7 +616,7 @@ function demo.http_gcd()
 						data:mutableBytes(), data:length(), NSUTF8StringEncoding)))
 
 		if n == 2 then
-			print'ok, hit Ctrl+C (twice)'
+			print'---- Done. Hit Ctrl+C twice ----'
 		end
 	end)
 	dispatch.async(queue, blk)  --increase refcount
@@ -714,9 +714,8 @@ local function run(...)
 	local testname = ...
 	if not testname then
 		print('Usage: '..luajit..' '..arg[0]..' <test>')
-		print'Available tests:'
 		for k,t in glue.sortedpairs(tests) do
-			printf('Available %s:', k)
+			printf('%s:', k)
 			for k in glue.sortedpairs(t) do
 				print('', k)
 			end

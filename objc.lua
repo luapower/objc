@@ -468,15 +468,28 @@ local function ftype_ctype(ftype, name, for_callback)
 	end
 end
 
-local function ftype_mtype(ftype) --convert ftype to type encoding
+local function ftype_mtype(ftype) --convert ftype to method type encoding
 	return (ftype.retval or 'v') .. table.concat(ftype)
 end
 
-local ctype_ct = memoize(function(ctype) --cache function pointer ct objects because we can only make 64k of them
+local static_mtype_ftype = memoize(function(mtype) --ftype cache for unnanotated method types
+	return mtype_ftype(mtype)
+end)
+
+--cache anonymous function objects by their signature because we can only make 64K anonymous ct objects
+--in luajit2 and there are a lot of duplicate method and function-pointer signatures (named functions are separate).
+local ctype_ct = memoize(function(ctype)
 	local ok,ct = pcall(ffi.typeof, ctype)
 	check(ok, 'ctype error for "%s": %s', ctype, ct)
 	return ct
 end)
+
+local function ftype_ct(ftype, name, for_callback)
+	local cachekey = 'cb_ct' or 'ct'
+	local ct = ftype[cachekey] or ctype_ct(ftype_ctype(ftype, name, for_callback))
+	ftype[cachekey] = ct --cache it, useful for static ftypes
+	return ct
+end
 
 --bridgesupport file parsing ---------------------------------------------------------------------------------------------
 
@@ -562,7 +575,7 @@ local function fp_arg(argtag, attrs, getwhile)
 
 	local argtype = attrs[typekey] or attrs.type
 	local fp = {isblock = argtype == '@?' or nil}
-	if fp.isblock then fp[1] = '^v' end --adjust type: first arg should be the block object
+	if fp.isblock then fp[1] = '^v' end --adjust type: arg#1 is a pointer to the block object
 
 	for tag, attrs in getwhile(argtag) do
 		if tag == 'arg' or tag == 'retval' then
@@ -967,11 +980,15 @@ local function formal_protocol_mtype(proto, sel, inst, required) --looks in supe
 end
 
 local function formal_protocol_ftype(...)
-	return mtype_ftype(formal_protocol_mtype(...))
+	return static_mtype_ftype(formal_protocol_mtype(...))
 end
 
 local function formal_protocol_ctype(proto, sel, inst, required, for_callback)
 	return ftype_ctype(formal_protocol_ftype(proto, sel, inst, required), nil, for_callback)
+end
+
+local function formal_protocol_ct(proto, sel, inst, required, for_callback)
+	return ftype_ct(formal_protocol_ftype(proto, sel, inst, required), nil, for_callback)
 end
 
 ffi.metatype('struct Protocol', {
@@ -986,6 +1003,7 @@ ffi.metatype('struct Protocol', {
 		mtype       = formal_protocol_mtype,
 		ftype       = formal_protocol_ftype,
 		ctype       = formal_protocol_ctype,
+		ct          = formal_protocol_ct,
 	},
 })
 
@@ -1050,11 +1068,15 @@ function infprot:mtype(sel, inst, required)
 end
 
 function infprot:ftype(...)
-	return mtype_ftype(self:mtype(...))
+	return static_mtype_ftype(self:mtype(...))
 end
 
 function infprot:ctype(sel, inst, required, for_callback)
 	return ftype_ctype(self:ftype(sel, inst, required), nil, for_callback)
+end
+
+function infprot:ct(sel, inst, required, for_callback)
+	return ftype_ct(self:ftype(sel, inst, required), nil, for_callback)
 end
 
 --all protocols
@@ -1159,11 +1181,11 @@ local function method_name(method)
 	return selector_name(method_selector(method))
 end
 
-local function method_mtype(method) --NOTE: this is the raw runtime mtype, not corrected by mta.
+local function method_mtype(method) --NOTE: this runtime mtype might look different if coorected by mta
 	return ffi.string(C.method_getTypeEncoding(method))
 end
 
-local function method_ftype(method) --NOTE: this is the raw runtime ftype, not corrected by mta.
+local function method_raw_ftype(method) --NOTE: this is the raw runtime ftype, not corrected by mta
 	return mtype_ftype(method_mtype(method))
 end
 
@@ -1177,7 +1199,7 @@ ffi.metatype('struct objc_method', {
 		selector        = method_selector,
 		name            = method_name,
 		mtype           = method_mtype,
-		ftype           = method_ftype,
+		raw_ftype       = method_raw_ftype,
 		implementation  = method_implementation,
 	},
 })
@@ -1364,6 +1386,10 @@ local function class_method(cls, sel) --looks for inherited methods too
 	return ptr(C.class_getInstanceMethod(class(cls), selector(sel)))
 end
 
+local function class_responds(cls, sel) --looks for inherited methods too
+	return C.class_respondsToSelector(superclass(cls), sel) == 1
+end
+
 local callsuper --fw. decl.
 
 --callback caller that inserts callsuper() as first arg.
@@ -1382,13 +1408,13 @@ local callback_caller -- fw. decl.
 local function add_class_method(cls, sel, func, ftype)
 	cls = class(cls)
 	sel = selector(sel)
-	local mtype = ftype
+	local mtype = assert(ftype, 'ftype or mtype expected')
 	if type(ftype) == 'string' then --it's a mtype, parse it
 		ftype = mtype_ftype(ftype)
 	else
 		mtype = ftype_mtype(ftype)
 	end
-	if superclass(cls) and C.class_respondsToSelector(superclass(cls), sel) == 1 then
+	if superclass(cls) and class_responds(cls, sel) then
 		--we're overriding: insert callsuper() as first arg for convenience.
 		local function callsuper_wrapper(obj, ...)
 			return callsuper(obj, selname, ...)
@@ -1401,13 +1427,13 @@ local function add_class_method(cls, sel, func, ftype)
 		end
 	end
 	func = callback_caller(ftype, func)         --wrapper that converts args and return values.
-	local ctype = ftype_ctype(ftype, nil, true) --special callback ctype stripped of pass-by-val structs.
-	local callback = ffi.cast(ctype_ct(ctype), func) --note: pins func; also, it will never be released.
+	local ct = ftype_ct(ftype, ni, true)        --get the callback ctype stripped of pass-by-val structs
+	local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	if logtopics.addmethod then
 		log('addmethod', '  %-40s %-40s %-8s %s', class_name(cls), selector_name(sel),
-									ismetaclass(cls) and 'class' or 'inst', ctype)
+				ismetaclass(cls) and 'class' or 'inst', ftype_ctype(ftype, nil, true))
 	end
 end
 
@@ -1529,16 +1555,24 @@ local function annotate_ftype(ftype, mta)
 	return ftype
 end
 
-local function method_arg_ftype(cls, selname, argindex) --for constructing blocks to pass to methods.
+local function method_ftype(cls, sel, method)
+	method = method or class_method(cls, sel)
+	local mta = get_mta(cls, sel)
+	if mta then
+		return annotate_ftype(method_raw_ftype(method), mta)
+	else
+		return static_mtype_ftype(method_mtype(method))
+	end
+end
+
+local function method_arg_ftype(cls, selname, argindex) --for constructing blocks to pass to methods
 	check(argindex, 'argindex expected')
 	local sel, method = find_method(cls, selname)
 	if not sel then return end
-	local ftype = annotate_ftype(method_ftype(method), get_mta(cls, sel))
-	return ftype.fp and ftype.fp[argindex + 2]
-end
-
-local function function_arg_ftype(funcname, argindex)
-	--TODO
+	local ftype = method_ftype(cls, sel, method)
+	argindex = argindex or 1
+	argindex = argindex == 'retval' and argindex or argindex + 2
+	return ftype, argindex
 end
 
 --class/instance method caller based on loose selector names.
@@ -1572,31 +1606,14 @@ end
 --methods for which we should refrain from retaining the result object
 noretain = {release=1, autorelease=1, retain=1, alloc=1, new=1, copy=1, mutableCopy=1}
 
-local fctype_cache_ = memoize(function(mtype)
-	local ftype = mtype_ftype(mtype)
-	local ctype = ftype_ctype(ftype)
-	local ct    = ctype_ct(ctype)
-	return {ftype, ct}
-end)
-local function fctype_cache(mtype)
-	return unpack(fctype_cache_(mtype))
-end
-
 --cache it to avoid re-parsing, annotating, formatting, casting, function-wrapping, method-wrapping.
 local method_caller = memoize2(function(cls, selname)
 	local sel, method = find_method(cls, selname)
 	if not sel then return end
 
-	local mtype = method_mtype(method)
-	local mta = get_mta(cls, sel)
-	local ftype, ct
-	if not mta then --unnanotated types can save us type parsing, formatting and ftype creation
-		ftype, ct = fctype_cache(mtype)
-	else
-		ftype = mtype_ftype(mtype)
-		ftype = annotate_ftype(ftype, mta)
-		ct    = ctype_ct(ftype_ctype(ftype))
-	end
+	local ftype = method_ftype(cls, sel, method)
+	local ct = ftype_ct(ftype)
+
 	local func = method_implementation(method)
 	local func = ffi.cast(ct, func)
 	local func = function_caller(ftype, func)
@@ -1636,17 +1653,15 @@ local function override(cls, selname, func, ftype) --returns true if a method wa
 	--look to override an existing method
 	local sel, method = find_method(cls, selname)
 	if sel then
-		if not ftype then
-			ftype = method_ftype(method)
-			ftype = annotate_ftype(ftype, get_mta(cls, sel))
-		end
+		ftype = ftype or method_ftype(cls, sel, method)
 		add_class_method(cls, sel, func, ftype)
 		return true
 	end
 	--look to override/create a conforming method
 	local sel, mtype = find_conforming_mtype(cls, selname)
 	if sel then
-		add_class_method(cls, sel, func, ftype or mtype)
+		ftype = ftype or static_mtype_ftype(mtype)
+		add_class_method(cls, sel, func, ftype)
 		return true
 	end
 end
@@ -1862,14 +1877,15 @@ local function block(func, ftype)
 		ftype = mtype_ftype(ftype)
 	end
 	if not ftype.isblock then --not given a block ftype, adjust it
+		ftype.isblock = true
 		table.insert(ftype, 1, '^v') --first arg. is the block object
 	end
-	local ctype = ftype_ctype(ftype, nil, true)
+	local ct = ftype_ct(ftype, nil, true)
 
 	local function caller(block, ...) --wrapper to remove the first arg
 		return func(...)
 	end
-	local callback = ffi.cast(ctype_ct(ctype), caller)
+	local callback = ffi.cast(ct, caller)
 
 	local refcount = 1
 
@@ -1971,30 +1987,69 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 	end
 end
 
-local function convert_fp_arg(fp, arg)
+local function convert_fp_arg(ftype, arg)
 	if type(arg) ~= 'function' then
 		return arg --pass through
 	end
-	if fp.isblock then
-		return block(arg, fp)
+	if ftype.isblock then
+		return block(arg, ftype)
 	else
-		local ctype = ftype_ctype(fp, nil, true)
-		return ffi.cast(ctype_ct(ctype), arg) --note: this callback will never be released.
+		local ct = ftype_ct(ftype, nil, true)
+		return ffi.cast(ct, arg) --note: this callback will never be released.
 	end
+end
+
+local function convert_arg(ftype, i, arg)
+	local argtype = ftype[i]
+	if argtype == ':' then
+		return selector(arg) --selector, string
+	elseif argtype == '#' then
+		return class(arg) --class, obj, classname
+	elseif argtype == '@' then
+		return toobj(arg) --string, number, array-table, dict-table
+	elseif ftype.fp and ftype.fp[i] then
+		return convert_fp_arg(ftype.fp[i], arg) --function
+	else
+		return arg --pass through
+	end
+end
+
+local function convert_args(ftype, i, ...) --not a tailcall but at least it doesn't make any garbage
+	if select('#', ...) == 0 then return end --is this compiled?
+	return convert_arg(ftype, i, ...), convert_args(ftype, i + 1, select(2, ...))
+end
+
+local function toarg(cls, selname, argindex, arg)
+	local ftype, argindex = method_arg_ftype(cls, selname, argindex)
+	if not ftype then return end
+	return convert_arg(ftype, argindex, arg)
 end
 
 --wrap a function for automatic type conversion of its args and return value.
 function function_caller(ftype, func)
+	return function(...)
+		local ret = func(convert_args(ftype, 1, ...))
+		if ret == nil then
+			return nil --NULL -> nil
+		elseif ftype.retval == 'B' then
+			return ret == 1 --BOOL -> boolean
+		elseif ftype.retval == '*' or ftype.retval == 'r*' then
+			return ffi.string(ret)
+		else
+			return ret --pass through
+		end
+	end
+end
+
+--wrap a callback for automatic type conversion of its args and return value.
+function callback_caller(ftype, func)
 
 	local function convert_arg(i, arg)
+
+		--TODO: finish this
+
 		local argtype = ftype[i]
-		if argtype == ':' then
-			return selector(arg) --selector, string
-		elseif argtype == '#' then
-			return class(arg) --class, obj, classname
-		elseif argtype == '@' then
-			return toobj(arg) --string, number, array-table, dict-table
-		elseif ftype.fp and ftype.fp[i] then
+		if ftype.fp and ftype.fp[i] then
 			return convert_fp_arg(ftype.fp[i], arg) --function
 		else
 			return arg --pass through
@@ -2008,23 +2063,12 @@ function function_caller(ftype, func)
 
 	return function(...)
 		local ret = func(convert_args(1, ...))
-		if ret == nil then
-			return nil --NULL -> nil
-		elseif ftype.retval == 'B' then
-			return ret == 1 --BOOL -> boolean
-		elseif ftype.retval == '*' or ftype.retval == 'r*' then
-			return ffi.string(ret)
+		if ftype.retval == '@' then
+			return toobj(ret)
 		else
-			return ret --pass through
+			return ret
 		end
 	end
-end
-
-function callback_caller(ftype, func)
-
-	--TODO: convert fp args to function ctype
-	--TODO: convert ret. val with toobj() if fp.retval is '@'
-	return func
 end
 
 --publish everything -----------------------------------------------------------------------------------------------------
@@ -2050,11 +2094,12 @@ objc.addprotocolmethod = add_informal_protocol_method
 objc.load = load_framework
 objc.searchpaths = searchpaths
 
---low-level
+--low-level type conversions (mostly for testing)
 objc.stype_ctype = stype_ctype
 objc.mtype_ftype = mtype_ftype
 objc.ftype_ctype = ftype_ctype
 objc.ctype_ct    = ctype_ct
+objc.ftype_ct    = ftype_ct
 
 --runtime/get
 objc.SEL = selector
@@ -2074,10 +2119,11 @@ objc.properties = class_properties
 objc.property = class_property
 objc.methods = class_methods
 objc.method = class_method
+objc.responds = class_responds
 objc.ivars = class_ivars
 objc.ivar = class_ivar
 objc.conform = add_class_protocol
-objc.argtype = method_arg_ftype
+objc.toarg = toarg
 
 --runtime/add
 objc.override = override
