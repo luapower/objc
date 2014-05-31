@@ -4,19 +4,23 @@ platforms: osx32, osx64
 tagline:   Objective-C bridge
 ---
 
-## IN DEVELOPMENT (coming soon)
-
 ## `local objc = require'objc'`
 
 Objecive-C runtime and BridgeSupport binding.
 
 ## Quick Tour
 
+### Loading Frameworks
+
 ~~~{.lua}
 --load a framework by name; `objc.searchpaths` says where the frameworks are. you can also use full paths.
---this loads the classes and protocols, but also C constants, enums, functions, structs and even macros.
+--classes and protocols are loaded, but also C constants, enums, functions, structs and even macros.
 objc.load'Foundation'
+~~~
 
+### Creating and using Objects
+
+~~~{.lua}
 --instantiate a class. the resulting object is retained and released on gc.
 --you can call `release()` on it too, for a more speedy destruction.
 local str = objc.NSString:alloc():initWithUTF8String'wazza'
@@ -24,24 +28,43 @@ local str = objc.NSString:alloc():initWithUTF8String'wazza'
 --call methods with multiple arguments using underscores for ':'. last underscore is optional.
 --C constants, enums and functions are in the objc namespace too.
 local result = str:compare_options(otherStr, objc.NSLiteralSearch)
+~~~
 
+### Subclassing
+
+~~~{.lua}
 --create a derived class. when creating a class, say which protocols you wish it conforms to,
 --so that you don't have to deal with type encodings when implementing its methods.
 objc.class('NSMainWindow', 'NSWindw <NSWindowDelegate>')
 
 --add methods to your class. the selector `windowWillClose` is from the `NSWindowDelegate` protocol
---so its type encoding is inferred from the protocol definition. arg#1 is sugar for calling the supermethod.
-function objc.NSMainWindow:windowWillClose(callsuper, notification)
-	return callsuper(self, notification)
+--so its type encoding is inferred from the protocol definition.
+function objc.NSMainWindow:windowWillClose(notification)
+	...
 end
 
+--override existing methods. when overriding an existing method, arg#1 is sugar for calling the supermethod.
+function objc.NSMainWindow:update(callsuper)
+	...
+	return callsuper(self)
+end
+
+~~~
+
+### Adding Lua Variables
+
+~~~{.lua}
 --add Lua variables to your objects - their lifetime is tied to the lifetime of the object.
 --you can also add class variables - they will be accessible through the objects too.
 objc.NSObject.myClassVar = 'I can live forever'
 local obj = objc.NSObject:new()
 obj.myInstanceVar = 'I live while obj lives'
 obj.myClassVar = 42 --change the class var (same value for all objects)
+~~~
 
+### Accessing Properties & IVars
+
+~~~{.lua}
 --get and set class and instance properties using the dot notation.
 local pr = objc.NSProgress:progressWithTotalUnitCount(123)
 print(pr.totalUnitCount) --prints 123
@@ -51,18 +74,36 @@ pr.totalUnitCount = 321  --sets it
 local obj = objc.NSDocInfo:new()
 obj.time = 123
 print(obj.time) --prints 123
+~~~
 
---create and use blocks manually. blocks are also created automatically when passing a Lua function
---where a block is expected, but that creates callback objects that cannot be freed.
---
+### Creating and using Blocks
+
+~~~{.lua}
+--blocks are created automatically when passing a Lua function where a block is expected.
+--their lifetime is auto-managed, for both synchronous and asynchronous methods.
 local str = objc.NSString:alloc():initWithUTF8String'line1\nline2\nline3'
-local block, callback = objc.block(function(line)
+str:enumerateLinesUsingBlock(function(line, stop)
 	print(line:UTF8String()) --'char *' return values are also converted to Lua strings automatically
-end, 'v@^B')
+end)
+
+--however, blocks are slow to create and use ffi callbacks which are very limited in number.
+--create your blocks outside loops if possible, or call `collectgarbage()` every few hundred iterations.
+
+--create a block with its type signature inferred from usage.
+--in this case, its type is that of arg#1 to NSString's `enumerateLinesUsingBlock` method.
+local block = objc.toarg(objc.NSString, 'enumerateLinesUsingBlock', 1, function(line, stop)
+	print(line:UTF8String())
+end)
 str:enumerateLinesUsingBlock(block)
-callback:free()
 
-
+--create a block with its method type encoding given manaully.
+--for type encodings see:
+--   https://code.google.com/p/jscocoa/wiki/MethodEncoding
+--   https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html
+local block = objc.block(function(line, stop)
+	print(line:UTF8String())
+end, 'v@^B'}) --retval is 'v' (void), line is '@' (object), stop is '^B' (pointer to BOOL)
+str:enumerateLinesUsingBlock(block)
 ~~~
 
 ## API Refrence

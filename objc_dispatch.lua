@@ -1,5 +1,6 @@
---grand central dispatch binding by Fjölnir Ásgeirsson (c) 2012, MIT license.
+--Grand Central Dispatch binding by Fjölnir Ásgeirsson (c) 2012, MIT license.
 --modified for luapower/objc by Cosmin Apreutesei, public domain.
+--not used yet, thus not finished. the API will probably change in the future.
 
 local ffi = require'ffi'
 local objc = require'objc'
