@@ -209,7 +209,7 @@ __classes__
 
 __object fields__
 
-`objc[field] -> x` \														access an instance field, i.e. try to get, in order: \
+`obj[field] -> x` \														access an instance field, i.e. try to get, in order: \
 																					- an instance luavar \
 																					- a readable instance property \
 																					- an ivar \
