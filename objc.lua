@@ -3,7 +3,6 @@
 --tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9.
 
 local ffi = require'ffi'
-local bit = require'bit'
 
 if ffi.arch ~= 'arm' and ffi.os == 'OSX' then
 	ffi.load('libobjc.A.dylib', true)
@@ -171,7 +170,7 @@ local function memoize2(func, cache1) --memoize a two-arg. function (:
 end
 
 local function canread(path) --check that a file is readable without having to open it
-	return C.access(path, bit.lshift(1,2)) == 0
+	return C.access(path, 2^2) == 0
 end
 
 local function citer(a) --return an iterator for a null-terminated C array
@@ -1009,22 +1008,18 @@ ffi.metatype('struct Protocol', {
 
 --informal protocols (must have the exact same API as formal protocols)
 
-local _informal_protocols = {} --{name = proto}
+local informal_protocols = {} --{name = proto}
 local infprot = {formal = false}
 local infprot_meta = {__index = infprot}
 
-local function informal_protocols()
-	return pairs(_informal_protocols)
-end
-
 local function informal_protocol(name)
-	return _informal_protocols[name]
+	return informal_protocols[name]
 end
 
 function add_informal_protocol(name)
 	if ffi.os == 'OSX' and formal_protocol(name) then return end --prevent needless duplication of formal protocols
 	local proto = setmetatable({_name = name, _methods = {}}, infprot_meta)
-	_informal_protocols[name] = proto
+	informal_protocols[name] = proto
 	return proto
 end
 
@@ -1086,7 +1081,7 @@ local function protocols() --list all loaded protocols
 		for proto in formal_protocols() do
 			coroutine.yield(proto)
 		end
-		for name, proto in informal_protocols() do
+		for name, proto in pairs(informal_protocols) do
 			coroutine.yield(proto)
 		end
 	end)
@@ -1181,7 +1176,7 @@ local function method_name(method)
 	return selector_name(method_selector(method))
 end
 
-local function method_mtype(method) --NOTE: this runtime mtype might look different if coorected by mta
+local function method_mtype(method) --NOTE: this runtime mtype might look different if corected by mta
 	return ffi.string(C.method_getTypeEncoding(method))
 end
 
@@ -1917,7 +1912,7 @@ local function block(func, ftype)
 	block = block_ct()
 
 	block.isa        = C._NSConcreteStackBlock --stack block because global blocks are not copied/disposed
-	block.flags      = bit.lshift(1, 25) --has copy & dispose helpers
+	block.flags      = 2^25 --has copy & dispose helpers
 	block.reserved   = 0
 	block.invoke     = ffi.cast(voidptr_ct, callback) --callback is pinned by dispose()
 	block.descriptor = block.d
