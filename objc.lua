@@ -1951,8 +1951,16 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 	end
 end
 
-local function fp_callback(fp, arg)
-	return arg
+local function convert_fp_arg(fp, arg)
+	if type(arg) ~= 'function' then
+		return arg --pass through
+	end
+	if fp.isblock then
+		return block(arg, fp)
+	else
+		local ctype = ftype_ctype(fp, nil, true)
+		return ffi.cast(ffi_ctype(ctype), arg) --note: this callback will never be released.
+	end
 end
 
 function function_caller(ftype, func) --wrap a function for automatic type conversion of its args and return value.
@@ -1978,7 +1986,7 @@ function function_caller(ftype, func) --wrap a function for automatic type conve
 		elseif argtype == '@' then
 			return toobj(arg) --string, number, array-table, dict-table
 		elseif ftype.fp and ftype.fp[i] then
-			return fp_callback(ftype.fp, arg)
+			return convert_fp_arg(ftype.fp[i], arg) --function
 		else
 			return arg --pass through
 		end

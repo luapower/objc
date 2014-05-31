@@ -370,12 +370,15 @@ function test.blocks()
 
 	local s = NSString:alloc():initWithUTF8String('line1\nline2\nline3')
 	local t = {}
-	s:enumerateLinesUsingBlock(block(function(line, pstop)
+
+	--note: the signature of the block arg for enumerateLinesUsingBlock was detected as `void (*) (id, BOOL*)`
+
+	s:enumerateLinesUsingBlock(function(line, pstop)
 		t[#t+1] = line:UTF8String()
 		if #t == 2 then --stop at line 2
 			pstop[0] = 1
 		end
-	end, {'@','^B'}))
+	end)
 	assert(#t == 2)
 	assert(t[1] == 'line1')
 	assert(t[2] == 'line2')
