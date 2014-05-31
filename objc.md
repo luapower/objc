@@ -1,7 +1,7 @@
 ---
 project:   objc
 platforms: osx32, osx64
-tagline:   Objective-C bridge
+tagline:   Obj-C & Cocoa bridge
 ---
 
 ## `local objc = require'objc'`
