@@ -43,8 +43,8 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
 
 ## Limitations
 
-  * blocks, function callbacks and overriden methods are based on luajit ffi callbacks
-  which have some limitations:
+  * blocks, function callbacks and overriden methods are based on ffi callbacks
+  which come with some limitations:
     * can't access the vararg part of the function, for variadic functions/methods
     * can't access the pass-by-value struct args or any arg after the first pass-by-value struct arg
 	 * can't return structs by value
