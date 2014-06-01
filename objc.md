@@ -209,14 +209,14 @@ __classes__
 
 __object fields__
 
-`obj[field] -> x` \														access an instance field, i.e. try to get, in order: \
-																					- an instance luavar \
+`obj.field` \																access an instance field, i.e. try to get, in order: \
+`obj:method(args...)`														- an instance luavar \
 																					- a readable instance property \
 																					- an ivar \
 																					- an instance method \
 																					- a class field (see below)
 
-`obj[name] = x`															set an instance field, i.e. try to set, in order: \
+`obj.field = val` \															set an instance field, i.e. try to set, in order: \
 																					- an existing instance luavar \
 																					- a writable instance property \
 																					- an ivar \
@@ -225,13 +225,13 @@ __object fields__
 
 __class fields__
 
-`cls[name] -> x`															access a class field, i.e. try to get, in order: \
-																					- a class luavar \
+`cls.field` \																access a class field, i.e. try to get, in order: \
+`cls:method(args...)`														- a class luavar \
 																					- a readable class property \
 																					- a class method
 
-`cls[name] = x`															set a class field, i.e. try to set, in order: \
-																					- an existing class luavar \
+`cls.field = val` \														set a class field, i.e. try to set, in order: \
+`function cls:method(args...) end`										- an existing class luavar \
 																					- a writable class property \
 																					- an instance method \
 																					- a conforming instance method \
