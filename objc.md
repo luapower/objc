@@ -397,8 +397,7 @@ __gc bridging__
   * function-pointer args on function-pointer args (recorded but not used - need use cases)
   * test for overriding a method that takes a function-pointer (not a block) arg and invoking that arg from the callback
   * auto-coercion of types for functions/methods with format strings, eg. NSLog
-    * record `printf_format` tag
-    * format string parser
+    * format string parser - apply to variadic functions and methods that have the `printf_format` attribute
   * return pass-by-reference out parameters as multiple Lua return values
     * record type modifiers O=out, N=inout
   * auto-allocation of out arrays using array type annotations
