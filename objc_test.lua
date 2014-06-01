@@ -737,7 +737,7 @@ VideoDecodeAcceleration
 VideoToolbox
 WebKit
 ]], '([^\n\r]+)') do
-		objc.load(s)
+		pcall(objc.load, s)
 	end
 	objc.debug.loaddeps = false
 end
