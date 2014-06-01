@@ -18,18 +18,18 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
 	 * creating classes and overriding methods
 	 * exploring and searching the Objective-C runtime
   * Platforms
-    * tested with __OSX 10.9__ on __32bit__ and __64bit__
+    * tested with __OSX 10.9__ (__32bit__ and __64bit__)
   * Dependencies
     * none for Cocoa (XML parser included), [expat] for non-standard bridgesupport files
   * Type Bridging
     * methods and functions return Lua booleans
     * Lua numbers, strings and tables can be passed for NSNumber, NSStrings, NSArray and NSDictionary args
 	 * string names can be passed for class and selector args
-	 * Lua functions can be passed for block and function-pointer args
-      * their type signature is inferred from the calling context
-    * overriding methods does not require specifying method type signatures
+	 * Lua functions can be passed for block and function-pointer args without specifying a type signature
+    * overriding methods does not require specifying the method type signature
       * method signatures are inferred from existing supermethods and conforming protocols
          * formal and informal protocols supported
+    * function-pointer args on overriden methods and blocks can be called without specifying a type signature
   * GC Bridging
     * attaching Lua variables to classes and objects
       * Lua variables follow the lifetime of Obj-C objects
@@ -393,8 +393,9 @@ __gc bridging__
 
 ### Bridging
 
-  * toarg() for functions
-  * fp args on fp args (recorded but not used - need use cases)
+  * toarg() for C functions (only works for methods)
+  * function-pointer args on function-pointer args (recorded but not used - need use cases)
+  * test for overriding a method that takes a function-pointer (not a block) arg and invoking that arg from the callback
   * auto-coercion of types for functions/methods with format strings, eg. NSLog
     * record `printf_format` tag
     * format string parser

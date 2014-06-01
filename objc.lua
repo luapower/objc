@@ -1877,7 +1877,8 @@ local function block(func, ftype)
 	end
 	local ct = ftype_ct(ftype, nil, true)
 
-	local function caller(block, ...) --wrapper to remove the first arg
+	func = callback_caller(ftype, func)  --wrapper to convert args and retvals
+	local function caller(block, ...)    --wrapper to remove the first arg
 		return func(...)
 	end
 	local callback = ffi.cast(ct, caller)
@@ -1982,6 +1983,8 @@ local function tolua(obj) --convert an objc object that converts naturally to a 
 	end
 end
 
+--convert arguments and retvals for functions and methods
+
 local function convert_fp_arg(ftype, arg)
 	if type(arg) ~= 'function' then
 		return arg --pass through
@@ -1990,7 +1993,7 @@ local function convert_fp_arg(ftype, arg)
 		return block(arg, ftype)
 	else
 		local ct = ftype_ct(ftype, nil, true)
-		return ffi.cast(ct, arg) --note: this callback will never be released.
+		return ffi.cast(ct, arg) --note: to get a chance to free this callback, you must get it with toarg()
 	end
 end
 
@@ -2010,7 +2013,7 @@ local function convert_arg(ftype, i, arg)
 end
 
 local function convert_args(ftype, i, ...) --not a tailcall but at least it doesn't make any garbage
-	if select('#', ...) == 0 then return end --is this compiled?
+	if select('#', ...) == 0 then return end
 	return convert_arg(ftype, i, ...), convert_args(ftype, i + 1, select(2, ...))
 end
 
@@ -2036,28 +2039,42 @@ function function_caller(ftype, func)
 	end
 end
 
+--convert arguments and retvals for callbacks, i.e. overriden methods and blocks
+
+local function convert_cb_fp_arg(ftype, arg)
+	if ftype.isblock then
+		return arg --let the user use it as an object, and call :invoke(), :retain() etc.
+	else
+		return ffi.cast(ftype_ct(ftype), arg)
+	end
+end
+
+local function convert_cb_arg(ftype, i, arg)
+	if ftype.fp and ftype.fp[i] then
+		return convert_cb_fp_arg(ftype.fp[i], arg)
+	else
+		return arg --pass through
+	end
+end
+
+local function convert_cb_args(ftype, i, ...) --not a tailcall but at least it doesn't make any garbage
+	if select('#', ...) == 0 then return end
+	return convert_cb_arg(i, ...), convert_cb_args(i + 1, select(2, ...))
+end
+
 --wrap a callback for automatic type conversion of its args and return value.
 function callback_caller(ftype, func)
-
-	local function convert_arg(i, arg)
-
-		--TODO: finish this
-
-		local argtype = ftype[i]
-		if ftype.fp and ftype.fp[i] then
-			return convert_fp_arg(ftype.fp[i], arg) --function
-		else
-			return arg --pass through
+	if not ftype.fp then
+		if ftype.retval == '@' then --only the return value to convert
+			return function(...)
+				return toobj(func(...))
+			end
+		else --nothing to convert
+			return func
 		end
 	end
-
-	local function convert_args(i, ...) --not a tailcall but at least it doesn't make any garbage
-		if select('#', ...) == 0 then return end --is this compiled?
-		return convert_arg(i, ...), convert_args(i + 1, select(2, ...))
-	end
-
 	return function(...)
-		local ret = func(convert_args(1, ...))
+		local ret = func(convert_cb_args(ftype, 1, ...))
 		if ftype.retval == '@' then
 			return toobj(ret)
 		else

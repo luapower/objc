@@ -309,15 +309,15 @@ function test.override()
 	local classdesc = 'hello-class'
 
 	function metacls:description() --override the class method
-		return NSString:alloc():initWithUTF8String(classdesc)
+		return classdesc --note: we can return the string directly.
 	end
 
 	function cls:description() --override the instance method
-		return NSString:alloc():initWithUTF8String(instdesc)
+		return instdesc --note: we can return the string directly.
 	end
 
-	assert(cls:description():UTF8String() == classdesc) --class method was overriden
-	assert(obj:description():UTF8String() == instdesc) --instance method was overriden and it's different
+	assert(objc.tolua(cls:description()) == classdesc) --class method was overriden
+	assert(objc.tolua(obj:description()) == instdesc) --instance method was overriden and it's different
 
 	--subclass and test again
 
@@ -326,15 +326,15 @@ function test.override()
 	local obj2 = cls2:new()
 
 	function metacls2:description(callsuper) --override the class method
-		return NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+		return callsuper(self):UTF8String() .. '2'
 	end
 
 	function cls2:description(callsuper) --override the instance method
-		return NSString:alloc():initWithUTF8String(callsuper(self):UTF8String() .. '2')
+		return callsuper(self):UTF8String() .. '2'
 	end
 
-	assert(cls2:description():UTF8String() == classdesc..'2') --class method was overriden
-	assert(obj2:description():UTF8String() == instdesc..'2') --instance method was overriden and it's different
+	assert(objc.tolua(cls2:description()) == classdesc..'2') --class method was overriden
+	assert(objc.tolua(obj2:description()) == instdesc..'2') --instance method was overriden and it's different
 end
 
 function test.ivars()
