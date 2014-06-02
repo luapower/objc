@@ -2059,7 +2059,7 @@ end
 
 local function convert_cb_args(ftype, i, ...) --not a tailcall but at least it doesn't make any garbage
 	if select('#', ...) == 0 then return end
-	return convert_cb_arg(i, ...), convert_cb_args(i + 1, select(2, ...))
+	return convert_cb_arg(ftype, i, ...), convert_cb_args(ftype, i + 1, select(2, ...))
 end
 
 --wrap a callback for automatic type conversion of its args and return value.
