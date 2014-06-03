@@ -1382,7 +1382,7 @@ local function class_method(cls, sel) --looks for inherited methods too
 end
 
 local function class_responds(cls, sel) --looks for inherited methods too
-	return C.class_respondsToSelector(superclass(cls), sel) == 1
+	return C.class_respondsToSelector(superclass(cls), selector(sel)) == 1
 end
 
 local callsuper --fw. decl.
@@ -1403,9 +1403,10 @@ local callback_caller -- fw. decl.
 local function add_class_method(cls, sel, func, ftype)
 	cls = class(cls)
 	sel = selector(sel)
-	local mtype = assert(ftype, 'ftype or mtype expected')
+	ftype = ftype or 'v@:'
+	local mtype = ftype
 	if type(ftype) == 'string' then --it's a mtype, parse it
-		ftype = mtype_ftype(ftype)
+		ftype = mtype_ftype(mtype)
 	else
 		mtype = ftype_mtype(ftype)
 	end
@@ -1581,15 +1582,12 @@ local refcounts = {} --number of collectable cdata references to an object
 
 local function inc_refcount(obj, n)
 	local refcount = (refcounts[nptr(obj)] or 0) + n
-	if refcount == 0 then
-		refcount = nil
-	end
-	refcounts[nptr(obj)] = refcount
+	refcounts[nptr(obj)] = refcount ~= 0 and refcount or nil
 	return refcount
 end
 
 local function release_object(obj)
-	if not inc_refcount(obj, -1) then
+	if inc_refcount(obj, -1) == 0 then
 		luavars[nptr(obj)] = nil
 	end
 end
@@ -1615,8 +1613,17 @@ local method_caller = memoize2(function(cls, selname)
 
 	local can_retain = not noretain[selname]
 	local is_release = selname == 'release' or selname == 'autorelease'
+	local log_refcount = (is_release or selname == 'retain') and logtopics.refcount
 
 	return function(obj, ...)
+
+		local before_rc, after_rc, objstr, before_luarc, after_luarc
+		if log_refcount then
+			objstr = tostring(obj)
+			before_rc = tonumber(obj:retainCount())
+			before_luarc = inc_refcount(obj, 0)
+		end
+
 		local ok, ret = xpcall(func, debug.traceback, obj, sel, ...)
 		if not ok then
 			check(false, '[%s %s] %s', tostring(cls), tostring(sel), ret)
@@ -1624,21 +1631,23 @@ local method_caller = memoize2(function(cls, selname)
 		if is_release then
 			ffi.gc(obj, nil) --disown this reference to obj
 			release_object(obj)
-			if logtopics.release then
-				log('release', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
-			end
-		end
-		if isobj(ret) then
+		elseif isobj(ret) then
 			if can_retain then
 				ret = ret:retain() --retain() will make ret a strong reference so we don't have to
-				if logtopics.retain then
-					log('retain', '%s, refcount after: %d', tostring(obj), tonumber(obj:retainCount()))
-				end
 			else
 				ffi.gc(ret, collect_object)
 				inc_refcount(ret, 1)
 			end
 		end
+
+		if log_refcount then
+			after_rc = before_rc == 1 and 0 or tonumber(obj:retainCount())
+			after_luarc = inc_refcount(obj, 0)
+			if logtopics.refcount then
+				log('refcount', '%s: %d -> %d (%d -> %d)', objstr, before_rc, after_rc, before_luarc, after_luarc)
+			end
+		end
+
 		return ret
 	end
 end)
