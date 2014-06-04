@@ -52,7 +52,7 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
 
 ## Quick Tutorial
 
-### Loading Frameworks
+### Loading frameworks
 
 ~~~{.lua}
 --load a framework by name; `objc.searchpaths` says where the frameworks are. you can also use full paths.
@@ -60,7 +60,7 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
 objc.load'Foundation'
 ~~~
 
-### Creating and using Objects
+### Creating and using objects
 
 ~~~{.lua}
 --instantiate a class. the resulting object is retained and released on gc.
@@ -93,7 +93,7 @@ end
 
 ~~~
 
-### Adding Lua Variables
+### Adding Lua variables
 
 ~~~{.lua}
 --add Lua variables to your objects - their lifetime is tied to the lifetime of the object.
@@ -104,7 +104,7 @@ obj.myInstanceVar = 'I live while obj lives'
 obj.myClassVar = 5 --change the class var (same value for all objects)
 ~~~
 
-### Accessing Properties & IVars
+### Accessing properties & ivars
 
 ~~~{.lua}
 --get and set class and instance properties using the dot notation.
@@ -118,7 +118,7 @@ obj.time = 123
 print(obj.time) --prints 123
 ~~~
 
-### Creating and using Blocks
+### Creating and using blocks
 
 ~~~{.lua}
 --blocks are created automatically when passing a Lua function where a block is expected.
@@ -148,11 +148,7 @@ end, 'v@^B'}) --retval is 'v' (void), line is '@' (object), stop is '^B' (pointe
 str:enumerateLinesUsingBlock(block)
 ~~~
 
-## More goodies
-
-Check out the unit test script, it also contains a few demos, not just tests.
-
-Check out the undocumented `objc_inspect` module, it has a simple cmdline inspection API.
+### More goodies
 
 Look up anything in Cocoa by a Lua pattern:
 
@@ -161,6 +157,27 @@ Look up anything in Cocoa by a Lua pattern:
 Then inspect it:
 
 		./luajit objc_test.lua inspect_class PAFootprint
+
+
+### Even more goodies
+
+Check out the unit test script, it also contains a few demos, not just tests. \
+Check out the undocumented `objc_inspect` module, it has a simple cmdline inspection API.
+
+
+### Gotchas
+
+Object arguments passed to overriden methods (even self), blocks and function pointers, are weak references,
+not tied to Lua's garbage collector. If you want to keep them around outside the scope of the callback,
+you need to retain them:
+
+~~~{.lua}
+local hard_ref
+function MySubClass:overridenMethod()
+	hard_ref = self:retain() --self is a weak ref. it needs to be retained.
+end
+~~~
+
 
 ## Main API
 

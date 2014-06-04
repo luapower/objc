@@ -1619,6 +1619,7 @@ local method_caller = memoize2(function(cls, selname)
 
 		local before_rc, after_rc, objstr, before_luarc, after_luarc
 		if log_refcount then
+			--get stuff from obj now because after the call obj can be a dead parrot
 			objstr = tostring(obj)
 			before_rc = tonumber(obj:retainCount())
 			before_luarc = inc_refcount(obj, 0)
