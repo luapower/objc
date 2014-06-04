@@ -182,7 +182,7 @@ end
 
 #### 2. Confusion about weak and hard references
 
-Ref. counting systems are fragile: they require that retain() and release() calls over the same object
+Ref. counting systems are fragile: they require that retain() and release() calls on an object
 be perfectly balanced. If they're not, you're toasted. Modelling object relationships in terms of
 weak and hard references can help a lot with that.
 
