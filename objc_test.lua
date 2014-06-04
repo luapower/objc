@@ -792,7 +792,7 @@ function eyetest.inspect_protocol(proto)
 end
 
 function eyetest.inspect_find(patt)
-	load_all_cocoa()
+	load_many_frameworks()
 	inspect.find(patt)
 end
 
