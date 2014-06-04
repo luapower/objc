@@ -167,6 +167,8 @@ Check out the undocumented `objc_inspect` module, it has a simple cmdline inspec
 
 ### Gotchas
 
+#### 1. Callback arguments are weak
+
 Object arguments passed to overriden methods (even self), blocks and function pointers, are weak references,
 not tied to Lua's garbage collector. If you want to keep them around outside the scope of the callback,
 you need to retain them:
@@ -177,6 +179,19 @@ function MySubClass:overridenMethod()
 	hard_ref = self:retain() --self is a weak ref. it needs to be retained.
 end
 ~~~
+
+#### 2. Confusion about weak and hard references
+
+Ref. counting systems are fragile: they require that retain() and release() calls over the same object
+be perfectly balanced. If they're not, you're toasted. Modelling object relationships in terms of
+weak and hard references can help a lot with that.
+
+Cocoa's rules are that if you alloc an object, you get a hard ref, otherwise you get a weak ref.
+But if you create a `NSWindow`, Cocoa (hand in glove with the user) gives you a weak ref because if the user
+closes the window, the window gets released. Objc doesn't know that and on gc it calls release again,
+giving you a crash at an unpredictable time (`export NSZombieEnabled=YES` can help here). To fix that
+you can either tell Cocoa that the ref is hard by calling `win:setReleasedWhenClosed(false)`, or tell the ffi
+that the ref is weak by calling `ffi.gc(win, nil)`.
 
 
 ## Main API

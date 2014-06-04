@@ -1184,6 +1184,10 @@ local function method_raw_ftype(method) --NOTE: this is the raw runtime ftype, n
 	return mtype_ftype(method_mtype(method))
 end
 
+local function method_raw_ctype(method) --NOTE: this is the raw runtime ctype, not corrected by mta
+	return ftype_ctype(method_raw_ftype(method))
+end
+
 local function method_implementation(method) --NOTE: this is of type IMP (i.e. vararg, untyped).
 	return ptr(C.method_getImplementation(method))
 end
@@ -1195,6 +1199,7 @@ ffi.metatype('struct objc_method', {
 		name            = method_name,
 		mtype           = method_mtype,
 		raw_ftype       = method_raw_ftype,
+		raw_ctype       = method_raw_ctype,
 		implementation  = method_implementation,
 	},
 })
@@ -1632,6 +1637,9 @@ local method_caller = memoize2(function(cls, selname)
 		if is_release then
 			ffi.gc(obj, nil) --disown this reference to obj
 			release_object(obj)
+			if before_rc == 1 then
+				after_rc = 0
+			end
 		elseif isobj(ret) then
 			if can_retain then
 				ret = ret:retain() --retain() will make ret a strong reference so we don't have to
@@ -1642,11 +1650,9 @@ local method_caller = memoize2(function(cls, selname)
 		end
 
 		if log_refcount then
-			after_rc = before_rc == 1 and 0 or tonumber(obj:retainCount())
+			after_rc = after_rc or tonumber(obj:retainCount())
 			after_luarc = inc_refcount(obj, 0)
-			if logtopics.refcount then
-				log('refcount', '%s: %d -> %d (%d -> %d)', objstr, before_rc, after_rc, before_luarc, after_luarc)
-			end
+			log('refcount', '%s: %d -> %d (%d -> %d)', objstr, before_luarc, after_luarc, before_rc, after_rc)
 		end
 
 		return ret
@@ -2160,10 +2166,11 @@ objc.caller = function(cls, selname)
 end
 objc.callsuper = callsuper
 
---hi-level
+--hi-level type conversions
 objc.block = block
 objc.toobj = toobj
 objc.tolua = tolua
+objc.nptr  = nptr
 
 --autoload
 local submodules = {
