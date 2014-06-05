@@ -1390,19 +1390,6 @@ local function class_responds(cls, sel) --looks for inherited methods too
 	return C.class_respondsToSelector(superclass(cls), selector(sel)) == 1
 end
 
-local callsuper --fw. decl.
-
---callback caller that inserts callsuper() as first arg.
-local function override_caller(obj, sel, func)
-	local selname = selector_name(sel)
-	local function callsuper_caller(obj, ...)
-		return callsuper(obj, selname, ...)
-	end
-	return function(obj, sel, ...)
-		return func(obj, callsuper_caller, ...)
-	end
-end
-
 local callback_caller -- fw. decl.
 
 local function add_class_method(cls, sel, func, ftype)
@@ -1415,19 +1402,10 @@ local function add_class_method(cls, sel, func, ftype)
 	else
 		mtype = ftype_mtype(ftype)
 	end
-	if superclass(cls) and class_responds(cls, sel) then
-		--we're overriding: insert callsuper() as first arg for convenience.
-		local function callsuper_wrapper(obj, ...)
-			return callsuper(obj, selname, ...)
-		end
-		func = override_caller(obj, sel, func)
-	else
-		local f = func
-		func = function(obj, sel, ...) --wrap to skip sel arg
-			return f(obj, ...)
-		end
+	local func = function(obj, sel, ...) --wrap to skip sel arg
+		return func(obj, ...)
 	end
-	func = callback_caller(ftype, func)         --wrapper that converts args and return values.
+	local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
 	local ct = ftype_ct(ftype, ni, true)        --get the callback ctype stripped of pass-by-val structs
 	local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
@@ -1677,7 +1655,7 @@ local function override(cls, selname, func, ftype) --returns true if a method wa
 	end
 end
 
-function callsuper(obj, selname, ...)
+local function callsuper(obj, selname, ...)
 	local super = superclass(obj)
 	if not super then return end
 	return method_caller(super, selname)(obj, ...)

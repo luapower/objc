@@ -85,10 +85,10 @@ function objc.NSMainWindow:windowWillClose(notification)
 	...
 end
 
---override existing methods. when overriding an existing method, arg#1 is sugar for calling the supermethod.
-function objc.NSMainWindow:update(callsuper)
+--override existing methods. use `objc.callsuper` to call the supermethod.
+function objc.NSMainWindow:update()
 	...
-	return callsuper(self)
+	return objc.callsuper(self, 'update')
 end
 
 ~~~

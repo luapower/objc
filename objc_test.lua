@@ -325,12 +325,12 @@ function test.override()
 	local metacls2 = metaclass(cls2)
 	local obj2 = cls2:new()
 
-	function metacls2:description(callsuper) --override the class method
-		return callsuper(self):UTF8String() .. '2'
+	function metacls2:description() --override the class method
+		return objc.callsuper(self, 'description'):UTF8String() .. '2'
 	end
 
 	function cls2:description(callsuper) --override the instance method
-		return callsuper(self):UTF8String() .. '2'
+		return objc.callsuper(self, 'description'):UTF8String() .. '2'
 	end
 
 	assert(objc.tolua(cls2:description()) == classdesc..'2') --class method was overriden
