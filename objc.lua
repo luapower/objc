@@ -870,7 +870,7 @@ function find_framework(name) --given a framework name or its full path, return 
 		end
 	else
 		local subname = name:gsub('%.framework', '%$') --escape the '.framework' suffix
-		subname = subname:gsub('%.', '.framework/Versions/Current/Frameworks/') --replace 'Framework.Subframework' syntax
+		subname = subname:gsub('%.', '.framework/Versions/Current/Frameworks/') --expand 'Framework.Subframework' syntax
 		subname = subname:gsub('%$', '.framework') --unescape it
 		name = name:match'([^%./]+)$' --strip relative path from name
 		for i,path in pairs(searchpaths) do
