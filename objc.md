@@ -58,6 +58,12 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
 --load a framework by name; `objc.searchpaths` says where the frameworks are. you can also use full paths.
 --classes and protocols are loaded, but also C constants, enums, functions, structs and even macros.
 objc.load'Foundation'
+
+--you can also load sub-frameworks like this:
+objc.load'Carbon.HIToolbox'
+
+--which is the same as using relative paths:
+objc.load'Carbon.framework/Versions/Current/Frameworks/HIToolbox'
 ~~~
 
 ### Creating and using objects

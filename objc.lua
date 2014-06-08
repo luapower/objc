@@ -856,7 +856,7 @@ local searchpaths = {
 }
 
 function find_framework(name) --given a framework name or its full path, return its full path and its name
-	if name:find'/' then
+	if name:find'^/' then
 		-- try 'path/foo.framework'
 		local path = name
 		local name = path:match'([^/]+)%.framework$'
@@ -869,8 +869,13 @@ function find_framework(name) --given a framework name or its full path, return 
 			return path, name
 		end
 	else
+		local subname = name:gsub('%.framework', '%$') --escape the '.framework' suffix
+		subname = subname:gsub('%.', '.framework/Versions/Current/Frameworks/') --replace 'Framework.Subframework' syntax
+		subname = subname:gsub('%$', '.framework') --unescape it
+		name = name:match'([^%./]+)$' --strip relative path from name
+		print(subname, name)
 		for i,path in pairs(searchpaths) do
-			path = _('%s/%s.framework', path, name)
+			path = _('%s/%s.framework', path, subname)
 			if canread(path) then
 				return path, name
 			end
