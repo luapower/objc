@@ -1192,6 +1192,10 @@ local function method_raw_ctype(method) --NOTE: this is the raw runtime ctype, n
 	return ftype_ctype(method_raw_ftype(method))
 end
 
+local function method_raw_ctype_cb(method)
+	return ftype_ctype(method_raw_ftype(method), nil, true)
+end
+
 local function method_implementation(method) --NOTE: this is of type IMP (i.e. vararg, untyped).
 	return ptr(C.method_getImplementation(method))
 end
@@ -1204,6 +1208,7 @@ ffi.metatype('struct objc_method', {
 		mtype           = method_mtype,
 		raw_ftype       = method_raw_ftype,
 		raw_ctype       = method_raw_ctype,
+		raw_ctype_cb    = method_raw_ctype_cb,
 		implementation  = method_implementation,
 	},
 })
