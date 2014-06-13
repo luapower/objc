@@ -215,6 +215,8 @@ __frameworks__
 
 `objc.searchpaths = {path1, ...}`									search paths for frameworks
 
+`objc.findframework(name|path) -> path, name`					find a framework in searchpaths
+
 __classes__
 
 `objc.class'name' -> cls`												class by name (`objc.class'Foo'` == `objc.Foo`)
