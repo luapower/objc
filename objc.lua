@@ -2108,6 +2108,8 @@ objc.addprotocolmethod = add_informal_protocol_method
 --loading frameworks
 objc.load = load_framework
 objc.searchpaths = searchpaths
+objc.memoize = memoize
+objc.findframework = find_framework
 
 --low-level type conversions (mostly for testing)
 objc.stype_ctype = stype_ctype
