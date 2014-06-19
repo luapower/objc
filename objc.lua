@@ -98,10 +98,6 @@ objc_property_t *protocol_copyPropertyList(Protocol *proto, unsigned int *outCou
 Protocol **class_copyProtocolList(Class cls, unsigned int *outCount);
 Protocol **protocol_copyProtocolList(Protocol *proto, unsigned int *outCount);
 Ivar * class_copyIvarList(Class cls, unsigned int *outCount);
-
-//instances
-Class object_getClass(id object);
-id objc_msgSend(id theReceiver, SEL theSelector, ...);
 ]]
 
 local C = ffi.C                               --C namespace
@@ -280,7 +276,7 @@ local function array_ctype(s, name, ...) --('[Ntype]', 'name') -> ctype('type', 
 end
 
 --note: `tag` means the struct tag in the C struct namespace; `name` means the typedef name in the C global namespace.
---for named structs only 'struct tag' is returned; for anonymous funcs the full 'struct {fields...}' is returned.
+--for named structs only 'struct `tag`' is returned; for anonymous structs the full 'struct {fields...}' is returned.
 --before returning, named structs are recursively cdef'ed (unless deftype ~= 'cdef' which skips this step).
 local function struct_ctype(s, name, deftype, indent) --('{CGPoint="x"d"y"d}', 'NSPoint') -> 'struct CGPoint NSPoint'
 
@@ -364,7 +360,7 @@ local function const_ctype(s, ...)
 end
 
 local ctype_decoders = {
-	['c'] = primitive_ctype'char', --BOOL is lost to this type in OSX
+	['c'] = primitive_ctype'char', --also for `BOOL` (boolean-ness is specified through method type annotations)
 	['i'] = primitive_ctype'int',
 	['s'] = primitive_ctype'short',
 	['l'] = primitive_ctype'long', --treated as a 32-bit quantity on 64-bit programs
@@ -380,7 +376,7 @@ local ctype_decoders = {
 	['d'] = primitive_ctype'double',
 	['D'] = primitive_ctype'long double',
 
-	['B'] = primitive_ctype'BOOL', --not in OSX runtime (only in bridgesupport, so for global functions)
+	['B'] = primitive_ctype'BOOL', --does not appear in the runtime, but in bridgesupport
 	['v'] = primitive_ctype'void',
 	['?'] = primitive_ctype'void', --unknown type; used for function pointers among other things
 
@@ -1932,7 +1928,7 @@ local function block(func, ftype)
 	return block_object
 end
 
---lua type conversions ---------------------------------------------------------------------------------------------------
+--Lua type conversions ---------------------------------------------------------------------------------------------------
 
 local function toobj(v) --convert a lua value to an objc object representing that value
 	if type(v) == 'number' then
