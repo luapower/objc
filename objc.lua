@@ -103,7 +103,7 @@ Ivar * class_copyIvarList(Class cls, unsigned int *outCount);
 local C = ffi.C                               --C namespace
 local P = setmetatable({}, {__index = _G})    --private namespace
 local objc = {}                               --public namespace
-setfenv(1, P)                                 --non-locals go in P
+setfenv(1, P)                                 --globals go in P, which is published as objc.debug
 
 --helpers ----------------------------------------------------------------------------------------------------------------
 
@@ -256,7 +256,7 @@ end
 --		variadic = true|nil         --vararg function
 --		isblock = true|nil          --block or function (only for function pointers)
 --		[argindex] = stype          --arg stype (argindex is 1,2,... or 'retval')
---		fp = {[argindex] = ftype}   --function pointer args
+--		fp = {[argindex] = ftype}   --ftypes for function-pointer type args
 
 local function optname(name) --format an optional name: if not nil, return it with a space in front
 	return name and ' '..name or ''
