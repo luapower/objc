@@ -1411,7 +1411,7 @@ local function add_class_method(cls, sel, func, ftype)
 		return func(obj, ...)
 	end
 	local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
-	local ct = ftype_ct(ftype, ni, true)        --get the callback ctype stripped of pass-by-val structs
+	local ct = ftype_ct(ftype, nil, true)       --get the callback ctype stripped of pass-by-val structs
 	local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
 	local imp = ffi.cast('IMP', callback)
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
