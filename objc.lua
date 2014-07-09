@@ -432,6 +432,24 @@ local function mtype_ftype(mtype) --eg. 'v12@0:4c8' (retval offset arg1 offset a
 	return ftype
 end
 
+--check if a ftype cannot be fully used with ffi callbacks, so we need to employ workarounds.
+local function ftype_needs_wrapping(ftype)
+	--ffi callbacks don't work with vararg methods.
+	if ftype.variadic then
+		return true
+	end
+	--ffi callbacks don't work with pass-by-value structs.
+	for i = 1, #ftype do
+		if ftype[i]:find'^[%{%(]' then
+			return true
+		end
+	end
+	--they also can't return structs directly.
+	if retval and retval:find'^[%{%(]' then
+		return true
+	end
+end
+
 --format a table representation of a method or function (ftype) to its C type or, if name given, its C declaration.
 --3rd arg = true means the type will be used for a ffi callback, which incurs some limitations.
 local function ftype_ctype(ftype, name, for_callback)
@@ -1397,6 +1415,8 @@ end
 
 local callback_caller -- fw. decl.
 
+cbframe = false --use cbframe for struct-by-val callbacks
+
 local function add_class_method(cls, sel, func, ftype)
 	cls = class(cls)
 	sel = selector(sel)
@@ -1411,9 +1431,16 @@ local function add_class_method(cls, sel, func, ftype)
 		return func(obj, ...)
 	end
 	local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
-	local ct = ftype_ct(ftype, nil, true)       --get the callback ctype stripped of pass-by-val structs
-	local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
-	local imp = ffi.cast('IMP', callback)
+	local imp
+	if cbframe and ftype_needs_wrapping(ftype) then
+		local cbframe = require'cbframe'            --runtime dependency, only needed with `cbframe` debug option.
+		local callback = cbframe.new(func)          --note: pins func; also, it will never be released.
+		imp = ffi.cast('IMP', callback.p)
+	else
+		local ct = ftype_ct(ftype, nil, true)       --get the callback ctype stripped of pass-by-val structs
+		local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
+		imp = ffi.cast('IMP', callback)
+	end
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	if logtopics.addmethod then
 		log('addmethod', '  %-40s %-40s %-8s %s', class_name(cls), selector_name(sel),
@@ -1874,13 +1901,22 @@ local function block(func, ftype)
 		ftype.isblock = true
 		table.insert(ftype, 1, '^v') --first arg. is the block object
 	end
-	local ct = ftype_ct(ftype, nil, true)
 
 	func = callback_caller(ftype, func)  --wrapper to convert args and retvals
 	local function caller(block, ...)    --wrapper to remove the first arg
 		return func(...)
 	end
-	local callback = ffi.cast(ct, caller)
+
+	local callback, callback_ptr
+	if cbframe and ftype_needs_wrapping(ftype) then
+		local cbframe = require'cbframe'            --runtime dependency, only needed with `cbframe` debug option.
+		callback = cbframe.new(func)
+		callback_ptr = callback.p
+	else
+		local ct = ftype_ct(ftype, nil, true)
+		callback = ffi.cast(ct, caller)
+		callback_ptr = callback
+	end
 
 	local refcount = 1
 
@@ -1914,7 +1950,7 @@ local function block(func, ftype)
 	block.isa        = C._NSConcreteStackBlock --stack block because global blocks are not copied/disposed
 	block.flags      = 2^25 --has copy & dispose helpers
 	block.reserved   = 0
-	block.invoke     = ffi.cast(voidptr_ct, callback) --callback is pinned by dispose()
+	block.invoke     = ffi.cast(voidptr_ct, callback_ptr) --callback is pinned by dispose()
 	block.descriptor = block.d
 	block.d.reserved = 0
 	block.d.size     = ffi.sizeof(block_ct)
