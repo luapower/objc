@@ -1427,16 +1427,16 @@ local function add_class_method(cls, sel, func, ftype)
 	else
 		mtype = ftype_mtype(ftype)
 	end
-	local func = function(obj, sel, ...) --wrap to skip sel arg
-		return func(obj, ...)
-	end
-	local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
 	local imp
 	if cbframe and ftype_needs_wrapping(ftype) then
 		local cbframe = require'cbframe'            --runtime dependency, only needed with `cbframe` debug option.
 		local callback = cbframe.new(func)          --note: pins func; also, it will never be released.
 		imp = ffi.cast('IMP', callback.p)
 	else
+		local func = function(obj, sel, ...) --wrap to skip sel arg
+			return func(obj, ...)
+		end
+		local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
 		local ct = ftype_ct(ftype, nil, true)       --get the callback ctype stripped of pass-by-val structs
 		local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
 		imp = ffi.cast('IMP', callback)
@@ -1902,17 +1902,16 @@ local function block(func, ftype)
 		table.insert(ftype, 1, '^v') --first arg. is the block object
 	end
 
-	func = callback_caller(ftype, func)  --wrapper to convert args and retvals
-	local function caller(block, ...)    --wrapper to remove the first arg
-		return func(...)
-	end
-
 	local callback, callback_ptr
 	if cbframe and ftype_needs_wrapping(ftype) then
 		local cbframe = require'cbframe'            --runtime dependency, only needed with `cbframe` debug option.
 		callback = cbframe.new(func)
 		callback_ptr = callback.p
 	else
+		local func = callback_caller(ftype, func)   --wrapper to convert args and retvals
+		local function caller(block, ...)           --wrapper to remove the first arg
+			return func(...)
+		end
 		local ct = ftype_ct(ftype, nil, true)
 		callback = ffi.cast(ct, caller)
 		callback_ptr = callback
