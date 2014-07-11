@@ -58,6 +58,9 @@ Class objc_allocateClassPair(Class superclass, const char *name, size_t extraByt
 void objc_registerClassPair(Class cls);
 BOOL class_isMetaClass(Class cls);
 
+//instances
+Class object_getClass(void* object);        // use this instead of obj.isa because of tagged pointers
+
 //methods
 Method class_getInstanceMethod(Class aClass, SEL aSelector);
 SEL method_getName(Method method);
@@ -1248,6 +1251,8 @@ local function ismetaclass(cls)
 	return C.class_isMetaClass(cls) == 1
 end
 
+local classof = C.object_getClass
+
 local function class(name, super, proto, ...) --find or create a class
 
 	if super == nil then --want to find a class, not to create one
@@ -1255,7 +1260,7 @@ local function class(name, super, proto, ...) --find or create a class
 			return name
 		end
 		if isobj(name) then --instance: return its class
-			return name.isa
+			return classof(name)
 		end
 		check(type(name) == 'string', 'object, class, or class name expected, got %s', type(name))
 		return ptr(C.objc_getClass(name))
@@ -1298,26 +1303,26 @@ local function class(name, super, proto, ...) --find or create a class
 end
 
 local function class_name(cls)
-	if isobj(cls) then cls = cls.isa end
+	if isobj(cls) then cls = classof(cls) end
 	return ffi.string(C.class_getName(class(cls)))
 end
 
 local function superclass(cls) --note: superclass(metaclass(cls)) == metaclass(superclass(cls))
-	if isobj(cls) then cls = cls.isa end
+	if isobj(cls) then cls = classof(cls) end
 	return ptr(C.class_getSuperclass(class(cls)))
 end
 
 local function metaclass(cls) --note: metaclass(metaclass(cls)) == nil
 	cls = class(cls)
-	if isobj(cls) then cls = cls.isa end
+	if isobj(cls) then cls = classof(cls) end
 	if ismetaclass(cls) then return nil end --OSX sets metaclass.isa to garbage
-	return ptr(cls.isa)
+	return ptr(classof(cls))
 end
 
 local function isa(cls, what)
 	what = class(what)
 	if isobj(cls) then
-		return cls.isa == what or isa(cls.isa, what)
+		return classof(cls) == what or isa(classof(cls), what)
 	end
 	local super = superclass(cls)
 	if super == what then
@@ -1780,26 +1785,27 @@ local function get_instance_field(obj, field)
 	if val ~= nil then
 		return val
 	end
+	local cls = classof(obj)
 	--look for an instance property
-	local prop = class_property(obj.isa, field)
+	local prop = class_property(cls, field)
 	if prop then
-		local caller = method_caller(obj.isa, property_getter(prop))
+		local caller = method_caller(cls, property_getter(prop))
 		if caller then --the getter is an instance method so this is an "instance property"
 			return caller(obj)
 		end
 	end
 	--look for an ivar
-	local ivar = class_ivar(obj.isa, field)
+	local ivar = class_ivar(cls, field)
 	if ivar then
 		return ivar_get_value(obj, field, ivar)
 	end
 	--look for an instance method
-	local caller = method_caller(obj.isa, field)
+	local caller = method_caller(cls, field)
 	if caller then
 		return caller
 	end
 	--finally, look for a class field
-	return get_class_field(obj.isa, field)
+	return get_class_field(cls, field)
 end
 
 --try to set, in order:
@@ -1815,12 +1821,13 @@ local function set_instance_field(obj, field, val)
 		set_luavar(obj, field, val)
 		return
 	end
+	local cls = classof(obj)
 	--look to set a writable instance property
-	local prop = class_property(obj.isa, field)
+	local prop = class_property(cls, field)
 	if prop then
 		local setter = property_setter(prop)
 		if setter then --not read-only
-			local caller = method_caller(obj.isa, setter)
+			local caller = method_caller(cls, setter)
 			if caller then --the setter is an instance method so this is an "instance property"
 				caller(obj, val)
 				return
@@ -1830,20 +1837,20 @@ local function set_instance_field(obj, field, val)
 		end
 	end
 	--look to set an ivar
-	local ivar = class_ivar(obj.isa, field)
+	local ivar = class_ivar(cls, field)
 	if ivar then
 		ivar_set_value(obj, field, ivar, val)
 		return
 	end
 	--look to set an existing class field
-	if set_existing_class_field(obj.isa, field, val) then return end
+	if set_existing_class_field(cls, field, val) then return end
 	--finally, add a new lua var
 	set_luavar(obj, field, val)
 end
 
 local function object_tostring(obj)
 	if obj == nil then return 'nil' end
-	return _('<%s>0x%x', class_name(obj.isa), nptr(obj))
+	return _('<%s>0x%x', class_name(obj), nptr(obj))
 end
 
 ffi.metatype('struct objc_object', {
