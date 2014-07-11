@@ -120,7 +120,7 @@ end
 
 local intptr_ct = ffi.typeof'intptr_t'
 
-local function nptr(p) --convert pointer to lua number for using as table key
+local function nptr(p) --convert pointer to Lua number for using as table key
 	if p == nil then return nil end
 	local np = ffi.cast(intptr_ct, p)
 	local n = tonumber(np)
@@ -1251,7 +1251,7 @@ local function ismetaclass(cls)
 	return C.class_isMetaClass(cls) == 1
 end
 
-local classof = C.object_getClass
+local classof = ffi.os == 'OSX' and C.object_getClass
 
 local function class(name, super, proto, ...) --find or create a class
 
@@ -1848,9 +1848,21 @@ local function set_instance_field(obj, field, val)
 	set_luavar(obj, field, val)
 end
 
-local function object_tostring(obj)
-	if obj == nil then return 'nil' end
-	return _('<%s>0x%x', class_name(obj), nptr(obj))
+local object_tostring
+
+if ffi.sizeof(intptr_ct) > 4 then
+	function object_tostring(obj)
+		if obj == nil then return 'nil' end
+		local i = ffi.cast('uintptr_t', obj)
+		local lo = tonumber(i % 2^32)
+		local hi = math.floor(tonumber(i / 2^32))
+		return _('<%s>0x%s', class_name(obj), hi ~= 0 and _('%x%08x', hi, lo) or _('%x', lo))
+	end
+else
+	function object_tostring(obj)
+		if obj == nil then return 'nil' end
+		return _('<%s>0x%08x', class_name(obj), tonumber(ffi.cast('uintptr_t', obj)))
+	end
 end
 
 ffi.metatype('struct objc_object', {
