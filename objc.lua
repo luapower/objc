@@ -907,8 +907,8 @@ function load_framework(namepath, option) --load a framework given its name or f
 	check(basepath, 'framework not found %s', namepath)
 	if not loaded[basepath] then
 		--load the framework binary which contains classes, functions and protocols
+		local path = _('%s/%s', basepath, name)
 		if canread(path) then
-			local path = _('%s/%s', basepath, name)
 			ffi.load(path, true)
 		end
 		--load the bridgesupport dylib which contains callable versions of inline functions (NSMakePoint, etc.)
