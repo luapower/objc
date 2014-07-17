@@ -448,7 +448,7 @@ local function ftype_needs_wrapping(ftype)
 		end
 	end
 	--they also can't return structs directly.
-	if retval and retval:find'^[%{%(]' then
+	if ftype.retval and ftype.retval:find'^[%{%(]' then
 		return true
 	end
 end
