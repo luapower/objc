@@ -1513,7 +1513,7 @@ ffi.metatype('struct objc_ivar', {
 	},
 })
 
---class/instance lua vars
+--class/instance luavars
 
 local luavars = {} --{[nptr(cls|obj)] = {var1 = val1, ...}}
 
@@ -1704,9 +1704,10 @@ end
 --		a class luavar
 --		a readable class property
 --		a class method
+--		a class luavar from a superclass
 local function get_class_field(cls, field)
 	assert(cls ~= nil, 'attempt to index a NULL class')
-	--look for an existing class lua var
+	--look for an existing class luavar
 	local val = get_luavar(cls, field)
 	if val ~= nil then
 		return val
@@ -1720,7 +1721,17 @@ local function get_class_field(cls, field)
 		end
 	end
 	--look for a class method
-	return method_caller(metaclass(cls), field)
+	local meth = method_caller(metaclass(cls), field)
+	if meth then return meth end
+	--look for an existing class luavar in a superclass
+	cls = superclass(cls)
+	while cls do
+		local val = get_luavar(cls, field)
+		if val ~= nil then
+			return val
+		end
+		cls = superclass(cls)
+	end
 end
 
 -- try to set, in order:
@@ -1730,8 +1741,9 @@ end
 --		a conforming instance method
 --		a class method
 --		a conforming class method
+--		an existing class luavar in a superclass
 local function set_existing_class_field(cls, field, val)
-	--look to set an existing class lua var
+	--look to set an existing class luavar
 	if get_luavar(cls, field) ~= nil then
 		set_luavar(cls, field, val)
 		return true
@@ -1751,6 +1763,15 @@ local function set_existing_class_field(cls, field, val)
 	--look to override an instance/instance-conforming/class/class-conforming method, in this order
 	if override(cls, field, val) then return true end
 	if override(metaclass(cls), field, val) then return true end
+	--look to set an existing class luavar in a superclass
+	cls = superclass(cls)
+	while cls do
+		if get_luavar(cls, field) ~= nil then
+			set_luavar(cls, field, val)
+			return true
+		end
+		cls = superclass(cls)
+	end
 end
 
 --try to set, in order:
@@ -1760,7 +1781,7 @@ local function set_class_field(cls, field, val)
 	assert(cls ~= nil, 'attempt to index a NULL class')
 	--look to set an existing class field
 	if set_existing_class_field(cls, field, val) then return end
-	--finally, set a new class lua var
+	--finally, set a new class luavar
 	set_luavar(cls, field, val)
 end
 
@@ -1780,7 +1801,7 @@ ffi.metatype('struct objc_class', {
 --		a class field (see above)
 local function get_instance_field(obj, field)
 	assert(obj ~= nil, 'attempt to index a NULL object')
-	--shortcut: look for an existing instance lua var
+	--shortcut: look for an existing instance luavar
 	local val = get_luavar(obj, field)
 	if val ~= nil then
 		return val
@@ -1816,7 +1837,7 @@ end
 --		a new instance luavar
 local function set_instance_field(obj, field, val)
 	assert(obj ~= nil, 'attempt to index a NULL object')
-	--shortcut: look to set an existing instance lua var
+	--shortcut: look to set an existing instance luavar
 	if get_luavar(obj, field) ~= nil then
 		set_luavar(obj, field, val)
 		return
@@ -1844,7 +1865,7 @@ local function set_instance_field(obj, field, val)
 	end
 	--look to set an existing class field
 	if set_existing_class_field(cls, field, val) then return end
-	--finally, add a new lua var
+	--finally, add a new luavar
 	set_luavar(obj, field, val)
 end
 

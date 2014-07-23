@@ -32,6 +32,7 @@ Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) | [Main API](
   * GC Bridging
     * attaching Lua variables to classes and objects
       * Lua variables follow the lifetime of Obj-C objects
+		* Lua variables attached to classes are inherited
     * automatic memory management of objects and blocks
       * blocks are refcounted and freed when their last owner releases them
   * Speed
@@ -104,7 +105,21 @@ end
 
 ~~~
 
-### Adding Lua variables
+### Converting between Lua and Obj-C types
+
+~~~{.lua}
+local str = objc.toobj'hello'             --create a NSString from a Lua string
+local num = objc.toobj(3.14)              --create a NSNumber from a Lua number
+local dic = objc.toobj{a = 1, b = 'hi'}   --create a NSDictionary from a Lua table
+local arr = objc.toobj{1, 2, 3}           --create a NSArray from a Lua table
+
+local s = objc.tolua(str)
+local n = objc.tolua(num)
+local t1 = objc.tolua(dic)
+local t2 = objc.tolua(arr)
+~~~
+
+### Adding Lua variables (luavars)
 
 ~~~{.lua}
 --add Lua variables to your objects - their lifetime is tied to the lifetime of the object.
@@ -114,6 +129,26 @@ local obj = objc.NSObject:new()
 obj.myInstanceVar = 'I live while obj lives'
 obj.myClassVar = 5 --change the class var (same value for all objects)
 ~~~
+
+### Adding Lua methods
+
+Lua methods are just Lua variables which happen to have a function-type value.
+You can add them to a class or to an instance, but that doesn't make them
+"class methods" or "instance methods" in OOP sense. Instead, this distinction
+comes about when you call them:
+
+~~~{.lua}
+function objc.NSObject:myMethod() end
+local str = objc.toobj'hello'   --create a NSString instance, which is a NSObject
+str:myMethod()                  --instance method (str passed as self)
+objc.NSString:myMethod()        --class method (NSString passed as self)
+~~~
+
+As you can see, luavars attached to a class are also inherited.
+
+> If this looks like a lot of magic, it is. The indexing rules for class and instance
+objects (i.e. getting and setting object and class fields) are pretty complex.
+Have a look at the API sections "object fields" and "class fields" to learn more.
 
 ### Accessing properties & ivars
 
@@ -273,7 +308,8 @@ __class fields__
 `cls.field` \																access a class field, i.e. try to get, in order: \
 `cls:method(args...)`														- a class luavar \
 																					- a readable class property \
-																					- a class method
+																					- a class method \
+																					- a class luavar from a superclass
 
 `cls.field = val` \														set a class field, i.e. try to set, in order: \
 `function cls:method(args...) end`										- an existing class luavar \
@@ -282,6 +318,7 @@ __class fields__
 																					- a conforming instance method \
 																					- a class method \
 																					- a conforming class method \
+																					- an existing class luavar in a superclass \
 																					- a new class luavar
 
 __type conversions__

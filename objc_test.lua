@@ -303,6 +303,18 @@ function test.luavars()
 	assert(inst2.myinstvar == 'DOH') --1 ref
 	inst2:release() --0 refs; instance gone, vars gone (no way to test, memory was freed)
 	assert(cls.myclassvar == 'doh2') --class vars still there
+
+	local i = 0
+	function NSObject:myMethod() i = i + 1 end
+	local str = toobj'hello'   --create a NSString instance, which is a NSObject
+	str:myMethod()             --instance method (str passed as self)
+	objc.NSString:myMethod()   --class method (NSString passed as self)
+	assert(i == 2)
+
+	function NSObject:myMethod() i = i - 1 end --override
+	str:myMethod()             --instance method (str passed as self)
+	objc.NSString:myMethod()   --class method (NSString passed as self)
+	assert(i == 0)
 end
 
 function test.override()
