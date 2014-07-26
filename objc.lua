@@ -68,6 +68,7 @@ const char *method_getTypeEncoding(Method method);
 IMP method_getImplementation(Method method);
 BOOL class_respondsToSelector(Class cls, SEL sel);
 IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
+void method_exchangeImplementations(Method m1, Method m2);
 
 //protocols
 Protocol *objc_getProtocol(const char *name);
@@ -1213,9 +1214,11 @@ local function method_raw_ctype_cb(method)
 	return ftype_ctype(method_raw_ftype(method), nil, true)
 end
 
-local function method_implementation(method) --NOTE: this is of type IMP (i.e. vararg, untyped).
+local function method_imp(method) --NOTE: this is of type IMP (i.e. vararg, untyped).
 	return ptr(C.method_getImplementation(method))
 end
+
+local method_exchange_imp = ffi.os == 'OSX' and C.method_exchangeImplementations
 
 ffi.metatype('struct objc_method', {
 	__tostring = method_name,
@@ -1226,7 +1229,8 @@ ffi.metatype('struct objc_method', {
 		raw_ftype       = method_raw_ftype,
 		raw_ctype       = method_raw_ctype,
 		raw_ctype_cb    = method_raw_ctype_cb,
-		implementation  = method_implementation,
+		imp             = method_imp,
+		exchange_imp    = method_exchange_imp,
 	},
 })
 
@@ -1627,7 +1631,7 @@ local method_caller = memoize2(function(cls, selname)
 	local ftype = method_ftype(cls, sel, method)
 	local ct = ftype_ct(ftype)
 
-	local func = method_implementation(method)
+	local func = method_imp(method)
 	local func = ffi.cast(ct, func)
 	local func = function_caller(ftype, func)
 
@@ -1696,6 +1700,23 @@ local function callsuper(obj, selname, ...)
 	local super = superclass(obj)
 	if not super then return end
 	return method_caller(super, selname)(obj, ...)
+end
+
+--swap two methods of a class.
+local function swizzle(cls, selname1, selname2, func)
+	cls = class(cls)
+	local sel1, method1 = find_method(cls, selname1)
+	local sel2, method2 = find_method(cls, selname2)
+	check(sel1, 'method not found: %s', selname1)
+	if not sel2 then
+		assert(func, 'implementation required for swizzling with new selector')
+		local ftype = method_ftype(cls, sel1, method1)
+		sel2 = selector(selname2)
+		add_class_method(cls, sel2, func, ftype)
+		method2 = class_method(cls, sel2)
+		assert(method2)
+	end
+	method1:exchange_imp(method2)
 end
 
 --class fields
@@ -2157,6 +2178,17 @@ function callback_caller(ftype, func)
 	end
 end
 
+--iterators --------------------------------------------------------------------------------------------------------------
+
+local function next_arr(arr, i)
+	if i >= arr:count() then return end
+	return i + 1, arr:objectAtIndex(i)
+end
+
+local function iter(arr)
+	return next_arr, arr, 0
+end
+
 --publish everything -----------------------------------------------------------------------------------------------------
 
 local function objc_protocols(cls) --compressed API
@@ -2217,6 +2249,7 @@ objc.toarg = toarg
 --runtime/add
 objc.override = override
 objc.addmethod = add_class_method
+objc.swizzle = swizzle
 
 --runtime/call
 objc.caller = function(cls, selname)
@@ -2231,6 +2264,7 @@ objc.block = block
 objc.toobj = toobj
 objc.tolua = tolua
 objc.nptr  = nptr
+objc.iter = iter
 
 --autoload
 local submodules = {
