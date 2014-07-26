@@ -2180,13 +2180,13 @@ end
 
 --iterators --------------------------------------------------------------------------------------------------------------
 
-local function next_arr(arr, i)
+local function array_next(arr, i)
 	if i >= arr:count() then return end
 	return i + 1, arr:objectAtIndex(i)
 end
 
-local function iter(arr)
-	return next_arr, arr, 0
+local function array_ipairs(arr)
+	return array_next, arr, 0
 end
 
 --publish everything -----------------------------------------------------------------------------------------------------
@@ -2264,7 +2264,7 @@ objc.block = block
 objc.toobj = toobj
 objc.tolua = tolua
 objc.nptr  = nptr
-objc.iter = iter
+objc.ipairs = array_ipairs
 
 --autoload
 local submodules = {

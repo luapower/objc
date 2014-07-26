@@ -331,6 +331,8 @@ __type conversions__
 																				NSNumber, NSString, NSDictionary, NSArray respectively.
 																				anything else passes through.
 
+`objc.ipairs(arr) -> next, arr, 0`									ipairs for NSarray.
+
 __overriding__
 
 `objc.override(cls, sel, func[,mtype|ftype]) -> true|false`	override an existing method, or add a method
@@ -339,6 +341,9 @@ __overriding__
 
 `objc.callsuper(obj, sel, args...) -> retval`					call the method implementation of the superclass
 																				of an object.
+
+`objc.swizle(cls, sel1, sel2[, func])`								swap implementations between sel1 and sel2.
+																				if sel2 is not an existing selector, func is required.
 
 __selectors__
 
