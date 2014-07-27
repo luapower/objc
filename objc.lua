@@ -1694,27 +1694,46 @@ local function override(cls, selname, func, ftype) --returns true if a method wa
 		add_class_method(cls, sel, func, ftype)
 		return true
 	end
+	--try again on the metaclass
+	cls = metaclass(cls)
+	if cls then
+		return override(cls, selname, func, ftype)
+	end
 end
 
+--call a method in the superclass of obj
 local function callsuper(obj, selname, ...)
 	local super = superclass(obj)
 	if not super then return end
 	return method_caller(super, selname)(obj, ...)
 end
 
---swap two methods of a class.
+--swap two instance/class methods of a class.
+--the second selector can be a new selector, in which case:
+--  1) it can't be a loose selector.
+--  2) its implementation (func) must be given.
 local function swizzle(cls, selname1, selname2, func)
 	cls = class(cls)
 	local sel1, method1 = find_method(cls, selname1)
 	local sel2, method2 = find_method(cls, selname2)
-	check(sel1, 'method not found: %s', selname1)
+	if not sel1 then
+		--try again on the metaclass
+		cls = metaclass(cls)
+		if cls then
+			return swizzle(cls, selname1, selname2, func)
+		else
+			check(false, 'method not found: %s', selname1)
+		end
+	end
 	if not sel2 then
-		assert(func, 'implementation required for swizzling with new selector')
+		check(func, 'implementation required for swizzling with new selector')
 		local ftype = method_ftype(cls, sel1, method1)
 		sel2 = selector(selname2)
 		add_class_method(cls, sel2, func, ftype)
 		method2 = class_method(cls, sel2)
 		assert(method2)
+	else
+		check(not func, 'second selector already implemented')
 	end
 	method1:exchange_imp(method2)
 end
@@ -1783,7 +1802,6 @@ local function set_existing_class_field(cls, field, val)
 	end
 	--look to override an instance/instance-conforming/class/class-conforming method, in this order
 	if override(cls, field, val) then return true end
-	if override(metaclass(cls), field, val) then return true end
 	--look to set an existing class luavar in a superclass
 	cls = superclass(cls)
 	while cls do
