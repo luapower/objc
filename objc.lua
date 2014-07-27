@@ -1357,25 +1357,26 @@ end
 local function class_conforms(cls, proto)
 	cls = class(cls)
 	proto = protocol(proto)
-	if C.class_conformsToProtocol(cls, proto) == 1 then
-		return true
+	if proto.formal then
+		return C.class_conformsToProtocol(cls, proto) == 1
+	else
+		local t = class_informal_protocols[nptr(cls)]
+		return t and t[proto:name()] and true or false
 	end
-	local t = class_informal_protocols[nptr(cls)]
-	return t and t[proto:name()] and true or false
 end
 
 function add_class_protocol(cls, proto, ...)
 	cls = class(cls)
 	proto = protocol(proto)
-	if type(proto) == 'table' then
+	if proto.formal then
+		C.class_addProtocol(class(cls), proto)
+	else
 		local t = class_informal_protocols[nptr(cls)]
 		if not t then
 			t = {}
 			class_informal_protocols[nptr(cls)] = t
 		end
 		t[proto:name()] = proto
-	else
-		C.class_addProtocol(class(cls), proto)
 	end
 	if ... then
 		add_class_protocol(cls, ...)
