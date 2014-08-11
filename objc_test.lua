@@ -375,6 +375,7 @@ function test.ivars()
 end
 
 function test.properties()
+	--TODO: find another class with r/w properties. NSProgress is not public on 10.7.
 	local pr = NSProgress:progressWithTotalUnitCount(123)
 	assert(pr.totalUnitCount == 123) --as initialized
 	pr.totalUnitCount = 321 --read/write property

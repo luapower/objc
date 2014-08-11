@@ -904,6 +904,9 @@ loaded = {} --{framework_name = true}
 loaded_bs = {} --{framework_name = true}
 
 function load_framework(namepath, option) --load a framework given its name or full path
+	if ffi.os ~= 'OSX' then
+		error('platform not OSX', 2)
+	end
 	local basepath, name = find_framework(namepath)
 	check(basepath, 'framework not found %s', namepath)
 	if not loaded[basepath] then
