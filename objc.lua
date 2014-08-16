@@ -3,8 +3,9 @@
 --tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9.
 
 local ffi = require'ffi'
+local OSX = ffi.os == 'OSX'
 
-if ffi.arch ~= 'arm' and ffi.os == 'OSX' then
+if OSX and ffi.arch ~= 'arm' then
 	ffi.load('libobjc.A.dylib', true)
 end
 
@@ -904,7 +905,7 @@ loaded = {} --{framework_name = true}
 loaded_bs = {} --{framework_name = true}
 
 function load_framework(namepath, option) --load a framework given its name or full path
-	if ffi.os ~= 'OSX' then
+	if not OSX then
 		error('platform not OSX', 2)
 	end
 	local basepath, name = find_framework(namepath)
@@ -1042,7 +1043,7 @@ local function informal_protocol(name)
 end
 
 function add_informal_protocol(name)
-	if ffi.os == 'OSX' and formal_protocol(name) then return end --prevent needless duplication of formal protocols
+	if OSX and formal_protocol(name) then return end --prevent needless duplication of formal protocols
 	local proto = setmetatable({_name = name, _methods = {}}, infprot_meta)
 	informal_protocols[name] = proto
 	return proto
@@ -1221,7 +1222,7 @@ local function method_imp(method) --NOTE: this is of type IMP (i.e. vararg, unty
 	return ptr(C.method_getImplementation(method))
 end
 
-local method_exchange_imp = ffi.os == 'OSX' and C.method_exchangeImplementations
+local method_exchange_imp = OSX and C.method_exchangeImplementations
 
 ffi.metatype('struct objc_method', {
 	__tostring = method_name,
@@ -1258,7 +1259,7 @@ local function ismetaclass(cls)
 	return C.class_isMetaClass(cls) == 1
 end
 
-local classof = ffi.os == 'OSX' and C.object_getClass
+local classof = OSX and C.object_getClass
 
 local function class(name, super, proto, ...) --find or create a class
 
