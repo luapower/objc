@@ -1,6 +1,9 @@
---objecive-c runtime+bridgesupport binding (Cosmin Apreutesei, public domain).
---ideas and code from TLC by Fjölnir Ásgeirsson (c) 2012, MIT license.
---tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9.
+
+--Objecive-C runtime and bridgesupport binding.
+--Written by Cosmin Apreutesei. Public domain.
+
+--Ideas and code from TLC by Fjölnir Ásgeirsson (c) 2012, MIT license.
+--Tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9 and 10.7.
 
 local ffi = require'ffi'
 local OSX = ffi.os == 'OSX'
