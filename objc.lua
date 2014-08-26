@@ -1614,6 +1614,7 @@ local refcounts = {} --number of collectable cdata references to an object
 
 local function inc_refcount(obj, n)
 	local refcount = (refcounts[nptr(obj)] or 0) + n
+	assert(refcount >= 0, 'over-releasing')
 	refcounts[nptr(obj)] = refcount ~= 0 and refcount or nil
 	return refcount
 end
@@ -1924,7 +1925,7 @@ if ffi.sizeof(intptr_ct) > 4 then
 		local i = ffi.cast('uintptr_t', obj)
 		local lo = tonumber(i % 2^32)
 		local hi = math.floor(tonumber(i / 2^32))
-		return _('<%s>0x%s', class_name(obj), hi ~= 0 and _('%x%08x', hi, lo) or _('%x', lo))
+		return _('<%s: 0x%s>', class_name(obj), hi ~= 0 and _('%x%08x', hi, lo) or _('%x', lo))
 	end
 else
 	function object_tostring(obj)
