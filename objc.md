@@ -6,10 +6,6 @@ tagline:   Obj-C & Cocoa bridge
 
 ## `local objc = require'objc'`
 
-Jump To: [Features](#features) | [Quick Tutorial](#quick-tutorial) |
-	[Memory Management](#memory-management) | [Main API](#main-api) |
-	[Reflection API](#reflection-api) | [Debug API](#debug-api)
-
 ## Features
 
   * Coverage
@@ -188,7 +184,6 @@ str:enumerateLinesUsingBlock(block)
 --create a block with its method type encoding given manaully.
 --for type encodings see:
 --   https://code.google.com/p/jscocoa/wiki/MethodEncoding
---   https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html
 local block = objc.block(function(line, stop)
 	print(line:UTF8String())
 end, 'v@^B'}) --retval is 'v' (void), line is '@' (object), stop is '^B' (pointer to BOOL)
