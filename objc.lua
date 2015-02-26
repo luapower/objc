@@ -60,6 +60,7 @@ const char *class_getName(Class cls);
 Class class_getSuperclass(Class cls);
 Class objc_allocateClassPair(Class superclass, const char *name, size_t extraBytes);
 void objc_registerClassPair(Class cls);
+void objc_disposeClassPair(Class cls);
 BOOL class_isMetaClass(Class cls);
 
 //instances
@@ -1305,6 +1306,7 @@ local function class(name, super, proto, ...) --find or create a class
 
 	local cls = check(ptr(C.objc_allocateClassPair(superclass, name, 0)))
    C.objc_registerClassPair(cls)
+   ffi.gc(cls, C.objc_disposeClassPair)
 
 	if proto then
 		add_class_protocol(cls, proto, ...)
@@ -2307,6 +2309,7 @@ setmetatable(objc, {
 	__index = function(t, k)
 		return class(k) or csymbol(k) or autoload(k)
 	end,
+	__autoload = submodules, --for inspection
 })
 
 --print namespace
