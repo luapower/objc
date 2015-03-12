@@ -1,5 +1,4 @@
 ---
-project:   objc
 platforms: osx32, osx64
 tagline:   Obj-C & Cocoa bridge
 ---
