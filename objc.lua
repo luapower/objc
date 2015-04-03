@@ -1306,8 +1306,9 @@ local function class(name, super, proto, ...) --find or create a class
 
 	local cls = check(ptr(C.objc_allocateClassPair(superclass, name, 0)))
    C.objc_registerClassPair(cls)
-   ffi.gc(cls, C.objc_disposeClassPair)
-
+   --TODO: we can't dispose the class if it has subclasses, so figure out
+   --a way to dispose it only after the last subclass has been disposed.
+   --ffi.gc(cls, C.objc_disposeClassPair)
 	if proto then
 		add_class_protocol(cls, proto, ...)
 	end
