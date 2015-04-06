@@ -47,7 +47,7 @@ which come with some limitations:
  * can't return structs by value
 
 To counter this, you can use [cbframe] as a workaround. Enable it with
-`objc.debug.cbframe = true` and now all the problem methods and blocks
+`objc.debug.cbframe = true` and now all problem methods and blocks
 will receive a single arg: a pointer to a [D_CPUSTATE] struct that you have
 to pick up args from and set return value into (note: self isn't passed,
 the cpu state is the only arg).
