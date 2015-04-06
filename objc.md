@@ -39,18 +39,20 @@ tagline:   Obj-C & Cocoa bridge
 
 ## Limitations
 
-  * blocks, function callbacks and overriden methods are based on ffi callbacks
-  which come with some limitations:
-    * can't access the vararg part of the function, for variadic functions/methods
-    * can't access the pass-by-value struct args or any arg after the first pass-by-value struct arg
-	 * can't return structs by value
-	* __UPDATE__: you can use [cbframe] as a workaround. Enable it with `objc.debug.cbframe = true`;
-	now all the problem methods and blocks will receive a single arg: a pointer to a [D_CPUSTATE] struct
-	that you have to pick up args from and set return value into (note: self isn't passed, the cpu state
-	is the only arg).
+Blocks, function callbacks and overriden methods are based on ffi callbacks
+which come with some limitations:
+
+ * can't access the vararg part of the function, for variadic functions/methods
+ * can't access the pass-by-value struct args or any arg after the first pass-by-value struct arg
+ * can't return structs by value
+
+To counter this, you can use [cbframe] as a workaround. Enable it with
+`objc.debug.cbframe = true` and now all the problem methods and blocks
+will receive a single arg: a pointer to a [D_CPUSTATE] struct that you have
+to pick up args from and set return value into (note: self isn't passed,
+the cpu state is the only arg).
 
 [D_CPUSTATE]: https://github.com/luapower/cbframe/blob/master/cbframe_x86_h.lua
-
 
 ## Quick Tutorial
 
