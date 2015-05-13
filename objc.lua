@@ -6,13 +6,15 @@
 --Tested with with LuaJIT 2.0.3, 32bit and 64bit on OSX 10.9 and 10.7.
 
 local ffi = require'ffi'
+local cast = ffi.cast
 local OSX = ffi.os == 'OSX'
+local x64 = ffi.abi'64bit'
 
 if OSX and ffi.arch ~= 'arm' then
 	ffi.load('libobjc.A.dylib', true)
 end
 
-if ffi.abi'64bit' then
+if x64 then
 	ffi.cdef[[
 	typedef double CGFloat;
 	typedef long NSInteger;
@@ -128,9 +130,11 @@ local intptr_ct = ffi.typeof'intptr_t'
 
 local function nptr(p) --convert pointer to Lua number for using as table key
 	if p == nil then return nil end
-	local np = ffi.cast(intptr_ct, p)
+	local np = cast(intptr_ct, p)
 	local n = tonumber(np)
-	assert(ffi.cast(intptr_ct, n) == np) --check that we don't get pointers in the upper 13 bits on 64bit
+	if x64 and cast(intptr_ct, n) ~= np then --hi address: fall back to slower tostring()
+		n = tostring(np)
+	end
 	return n
 end
 
@@ -541,8 +545,8 @@ function tag.depends_on(attrs)
 	end
 end
 
-local typekey = ffi.abi'64bit' and 'type64' or 'type'
-local valkey = ffi.abi'64bit' and 'value64' or 'value'
+local typekey = x64 and 'type64' or 'type'
+local valkey = x64 and 'value64' or 'value'
 
 function tag.string_constant(attrs)
 	--note: some of these are NSStrings but we load them all as Lua strings.
@@ -1451,15 +1455,15 @@ local function add_class_method(cls, sel, func, ftype)
 	if cbframe and ftype_needs_wrapping(ftype) then
 		local cbframe = require'cbframe'            --runtime dependency, only needed with `cbframe` debug option.
 		local callback = cbframe.new(func)          --note: pins func; also, it will never be released.
-		imp = ffi.cast('IMP', callback.p)
+		imp = cast('IMP', callback.p)
 	else
 		local func = function(obj, sel, ...) --wrap to skip sel arg
 			return func(obj, ...)
 		end
 		local func = callback_caller(ftype, func)   --wrapper that converts args and return values.
 		local ct = ftype_ct(ftype, nil, true)       --get the callback ctype stripped of pass-by-val structs
-		local callback = ffi.cast(ct, func)         --note: pins func; also, it will never be released.
-		imp = ffi.cast('IMP', callback)
+		local callback = cast(ct, func)         --note: pins func; also, it will never be released.
+		imp = cast('IMP', callback)
 	end
 	C.class_replaceMethod(cls, sel, imp, mtype) --add or replace
 	if logtopics.addmethod then
@@ -1510,11 +1514,11 @@ end
 local byteptr_ct = ffi.typeof'uint8_t*'
 
 local function ivar_get_value(obj, name, ivar)
-	return ffi.cast(ivar_ct(ivar), ffi.cast(byteptr_ct, obj) + ivar_offset(ivar))[0]
+	return cast(ivar_ct(ivar), cast(byteptr_ct, obj) + ivar_offset(ivar))[0]
 end
 
 local function ivar_set_value(obj, name, ivar, val)
-	ffi.cast(ivar_ct(ivar), ffi.cast(byteptr_ct, obj) + ivar_offset(ivar))[0] = val
+	cast(ivar_ct(ivar), cast(byteptr_ct, obj) + ivar_offset(ivar))[0] = val
 end
 
 ffi.metatype('struct objc_ivar', {
@@ -1644,7 +1648,7 @@ local method_caller = memoize2(function(cls, selname)
 	local ct = ftype_ct(ftype)
 
 	local func = method_imp(method)
-	local func = ffi.cast(ct, func)
+	local func = cast(ct, func)
 	local func = function_caller(ftype, func)
 
 	local can_retain = not noretain[selname]
@@ -1925,7 +1929,7 @@ local object_tostring
 if ffi.sizeof(intptr_ct) > 4 then
 	function object_tostring(obj)
 		if obj == nil then return 'nil' end
-		local i = ffi.cast('uintptr_t', obj)
+		local i = cast('uintptr_t', obj)
 		local lo = tonumber(i % 2^32)
 		local hi = math.floor(tonumber(i / 2^32))
 		return _('<%s: 0x%s>', class_name(obj), hi ~= 0 and _('%x%08x', hi, lo) or _('%x', lo))
@@ -1933,7 +1937,7 @@ if ffi.sizeof(intptr_ct) > 4 then
 else
 	function object_tostring(obj)
 		if obj == nil then return 'nil' end
-		return _('<%s>0x%08x', class_name(obj), tonumber(ffi.cast('uintptr_t', obj)))
+		return _('<%s>0x%08x', class_name(obj), tonumber(cast('uintptr_t', obj)))
 	end
 end
 
@@ -2004,7 +2008,7 @@ local function block(func, ftype)
 			return func(...)
 		end
 		local ct = ftype_ct(ftype, nil, true)
-		callback = ffi.cast(ct, caller)
+		callback = cast(ct, caller)
 		callback_ptr = callback
 	end
 
@@ -2032,22 +2036,22 @@ local function block(func, ftype)
 		assert(refcount >= 0)
 	end
 
-	copy_callback = ffi.cast(copy_helper_ct, copy)
-	dispose_callback = ffi.cast(dispose_helper_ct, dispose)
+	copy_callback = cast(copy_helper_ct, copy)
+	dispose_callback = cast(dispose_helper_ct, dispose)
 
 	block = block_ct()
 
 	block.isa        = C._NSConcreteStackBlock --stack block because global blocks are not copied/disposed
 	block.flags      = 2^25 --has copy & dispose helpers
 	block.reserved   = 0
-	block.invoke     = ffi.cast(voidptr_ct, callback_ptr) --callback is pinned by dispose()
+	block.invoke     = cast(voidptr_ct, callback_ptr) --callback is pinned by dispose()
 	block.descriptor = block.d
 	block.d.reserved = 0
 	block.d.size     = ffi.sizeof(block_ct)
 	block.d.copy_helper    = copy_callback
 	block.d.dispose_helper = dispose_callback
 
-	local block_object = ffi.cast(id_ct, block) --block remains pinned by dispose()
+	local block_object = cast(id_ct, block) --block remains pinned by dispose()
 	ffi.gc(block_object, dispose)
 
 	log('block', 'create\trefcount: %-8d', refcount)
@@ -2076,7 +2080,7 @@ local function toobj(v) --convert a lua value to an objc object representing tha
 			 return arr
 		end
 	elseif isclass(v) then
-		return ffi.cast(id_ct, v) --needed to convert arg#1 for class methods
+		return cast(id_ct, v) --needed to convert arg#1 for class methods
 	else
 		return v --pass through
 	end
@@ -2118,7 +2122,7 @@ local function convert_fp_arg(ftype, arg)
 		return block(arg, ftype)
 	else
 		local ct = ftype_ct(ftype, nil, true)
-		return ffi.cast(ct, arg) --note: to get a chance to free this callback, you must get it with toarg()
+		return cast(ct, arg) --note: to get a chance to free this callback, you must get it with toarg()
 	end
 end
 
@@ -2170,7 +2174,7 @@ local function convert_cb_fp_arg(ftype, arg)
 	if ftype.isblock then
 		return arg --let the user use it as an object, and call :invoke(), :retain() etc.
 	else
-		return ffi.cast(ftype_ct(ftype), arg)
+		return cast(ftype_ct(ftype), arg)
 	end
 end
 
