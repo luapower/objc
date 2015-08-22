@@ -1440,6 +1440,16 @@ end
 local callback_caller -- fw. decl.
 
 cbframe = false --use cbframe for struct-by-val callbacks
+local cbframe_stack = {}
+
+local function use_cbframe()
+	table.insert(cbframe_stack, cbframe)
+	cbframe = true
+end
+
+local function stop_using_cbframe()
+	cbframe = table.remove(cbframe_stack)
+end
 
 local function add_class_method(cls, sel, func, ftype)
 	cls = class(cls)
@@ -2236,6 +2246,8 @@ end
 --debug
 objc.C = C
 objc.debug = P
+objc.use_cbframe = use_cbframe
+objc.stop_using_cbframe = stop_using_cbframe
 
 --manual declarations
 objc.addfunction = add_function
