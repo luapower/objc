@@ -936,9 +936,15 @@ function load_framework(namepath, option) --load a framework given its name or f
 	if loadtypes and option ~= 'notypes' and not loaded_bs[basepath] then
 		loaded_bs[basepath] = true --set it before loading the file to prevent recursion from depends_on tag
 		--load the bridgesupport xml file which contains typedefs and constants which we can't get from the runtime.
-		local path = _('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
+		--try a local copy first because see https://github.com/luapower/objc/issues/5.
+		local path = _('bridgesupport/%s.bridgesupport', name)
 		if canread(path) then
 			load_bridgesupport(path)
+		else
+			local path = _('%s/Resources/BridgeSupport/%s.bridgesupport', basepath, name)
+			if canread(path) then
+				load_bridgesupport(path)
+			end
 		end
 	end
 end
