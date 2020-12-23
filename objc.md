@@ -39,6 +39,8 @@ platforms: osx64
 
 ## Limitations
 
+### FFI callback limitations
+
 Blocks, function callbacks and overriden methods are based on ffi callbacks
 which come with some limitations:
 
@@ -53,6 +55,14 @@ to pick up args from and write the return value into. Note that self
 isn't passed in this case, the cpu state is the only arg.
 
 [D_CPUSTATE]: https://github.com/luapower/cbframe/blob/master/cbframe_x86_h.lua
+
+### Broken bridgesupport files in OSX 10.13+
+
+`*.bridgesupport` files are required to get extra type information not covered
+by the objc RTTI API. In OSX 10.13 and above, these files are broken, so you
+need to deploy your own and put them in the `bridgesupport` directory.
+The files from OSX 10.12.6 are available at https://github.com/bridgesupport
+(just use `mgit clone bridgesupport` if you're using mgit).
 
 ## Quick Tutorial
 
