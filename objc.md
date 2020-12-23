@@ -61,7 +61,7 @@ isn't passed in this case, the cpu state is the only arg.
 `*.bridgesupport` files are required to get extra type information not covered
 by the objc RTTI API. In OSX 10.13 and above, these files are broken, so you
 need to deploy your own and put them in the `bridgesupport` directory.
-The files from OSX 10.12.6 are available at https://github.com/bridgesupport
+The files from OSX 10.12.6 are available at https://github.com/luapower/bridgesupport
 (just use `mgit clone bridgesupport` if you're using mgit).
 
 ## Quick Tutorial
